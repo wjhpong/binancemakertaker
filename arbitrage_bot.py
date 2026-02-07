@@ -257,7 +257,8 @@ class SpotFuturesArbitrageBot:
     ) -> list[tuple[int, float, float]]:
         """选出满足 spread 的档位（买二/买三），按固定比例分配预算。
 
-        返回 [(level_idx, price, qty), ...] ，空列表表示无合适档位。
+        当前策略要求买二和买三必须同时满足条件，否则本轮不挂单。
+        返回 [(level_idx, price, qty), ...] ，空列表表示本轮不挂。
         """
         if fut_bid <= 0:
             logger.warning("期货 bid 无效: %s", fut_bid)
@@ -275,13 +276,19 @@ class SpotFuturesArbitrageBot:
         results: list[tuple[int, float, float]] = []
         for level_idx, weight in self._LEVEL_WEIGHTS.items():
             if level_idx > len(spot_bids):
-                break
+                logger.info("[SELECT] 盘口深度不足，缺少买%d，跳过本轮", level_idx)
+                return []
             bid_price, level_qty = spot_bids[level_idx - 1]
             if bid_price <= 0:
-                continue
+                logger.info("[SELECT] 买%d 价格无效，跳过本轮", level_idx)
+                return []
             spread = (fut_bid - bid_price) / bid_price
             if spread < min_spread:
-                continue
+                logger.info(
+                    "[SELECT] 买%d spread=%.4fbps 低于门槛 %.4fbps，本轮不挂",
+                    level_idx, spread * 10000, min_spread * 10000,
+                )
+                return []
 
             qty = cycle_budget * weight
 
@@ -291,7 +298,11 @@ class SpotFuturesArbitrageBot:
 
             qty = int(qty / lot) * lot
             if qty < self.cfg.min_order_qty:
-                continue
+                logger.info(
+                    "[SELECT] 买%d 数量 %.6f 小于最小下单量 %.6f，本轮不挂",
+                    level_idx, qty, self.cfg.min_order_qty,
+                )
+                return []
 
             results.append((level_idx, bid_price, qty))
             logger.debug(
