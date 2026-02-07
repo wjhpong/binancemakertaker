@@ -106,12 +106,15 @@ class SpotFuturesArbitrageBot:
 
     # ── 多档选档 + 深度加权分配 ───────────────────────────────
 
+    # 固定比例分配：买二 30%, 买三 70%
+    _LEVEL_WEIGHTS: dict[int, float] = {2: 0.30, 3: 0.70}
+
     def _select_all_levels(
         self,
         spot_bids: list[tuple[float, float]],
         fut_bid: float,
     ) -> list[tuple[int, float, float]]:
-        """选出所有满足 spread 的档位，按深度比例分配预算。
+        """选出满足 spread 的档位（买二/买三），按固定比例分配预算。
 
         返回 [(level_idx, price, qty), ...] ，空列表表示无合适档位。
         """
@@ -120,50 +123,34 @@ class SpotFuturesArbitrageBot:
             return []
 
         min_spread = self.fee.min_spread
+        cycle_budget = self.cfg.total_budget * self.cfg.budget_pct
+        lot = self.cfg.lot_size
 
-        # 第一轮：筛选满足 spread 的档位
-        qualifying: list[tuple[int, float, float]] = []  # (level_idx, price, depth_qty)
-        for level_idx in range(self.cfg.min_level, self.cfg.max_level + 1):
+        results: list[tuple[int, float, float]] = []
+        for level_idx, weight in self._LEVEL_WEIGHTS.items():
             if level_idx > len(spot_bids):
                 break
             bid_price, level_qty = spot_bids[level_idx - 1]
             if bid_price <= 0:
                 continue
             spread = (fut_bid - bid_price) / bid_price
-            if spread >= min_spread:
-                qualifying.append((level_idx, bid_price, level_qty))
+            if spread < min_spread:
+                continue
 
-        if not qualifying:
-            return []
-
-        # 第二轮：按深度比例分配预算
-        total_depth = sum(dq for _, _, dq in qualifying)
-        if total_depth <= 0:
-            return []
-
-        cycle_budget = self.cfg.total_budget * self.cfg.budget_pct  # 每轮总预算(USDT)
-
-        results: list[tuple[int, float, float]] = []
-        for level_idx, bid_price, depth_qty in qualifying:
-            weight = depth_qty / total_depth
-            level_budget = cycle_budget * weight
-            qty = level_budget / bid_price
+            qty = (cycle_budget * weight) / bid_price
 
             # 深度上限约束
-            depth_cap = depth_qty * self.cfg.depth_ratio
+            depth_cap = level_qty * self.cfg.depth_ratio
             qty = min(qty, depth_cap)
 
-            # lot_size 向下取整
-            lot = self.cfg.lot_size
             qty = int(qty / lot) * lot
-
             if qty < self.cfg.min_order_qty:
                 continue
 
             results.append((level_idx, bid_price, qty))
             logger.debug(
-                "[SELECT] 买%d: price=%.4f, depth=%.2f, weight=%.1f%%, qty=%.2f",
-                level_idx, bid_price, depth_qty, weight * 100, qty,
+                "[SELECT] 买%d: price=%.4f, weight=%d%%, qty=%.2f",
+                level_idx, bid_price, int(weight * 100), qty,
             )
 
         return results

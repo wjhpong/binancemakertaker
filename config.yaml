@@ -15,7 +15,7 @@ strategy:
   min_level: 2              # 最浅挂单档位（2=买二）
   max_level: 5              # 最深挂单档位（5=买五）
   poll_interval_sec: 0.2    # 主循环轮询间隔(秒)
-  reprice_bps: 0.5          # 改单阈值(基点)
+  reprice_bps: 5.0          # 改单阈值(基点)，约3档价差才触发改单
   max_retry: 3              # 对冲重试次数
 
 logging:
