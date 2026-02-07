@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import sys
 from dataclasses import replace
@@ -20,11 +19,6 @@ from trade_logger import TradeLogger
 from ws_manager import WSManager
 
 logger = logging.getLogger("run")
-
-_FEISHU_WEBHOOK = os.environ.get(
-    "FEISHU_WEBHOOK",
-    "",
-)
 
 
 def main() -> None:
@@ -72,9 +66,12 @@ def main() -> None:
     logger.info("=" * 60)
 
     # ── 初始化飞书通知器 ──
+    # 注意：必须在 load_config() 之后读取，确保 .env 已加载进环境变量
+    import os
+    feishu_webhook = os.environ.get("FEISHU_WEBHOOK", "")
     notifier = None
-    if _FEISHU_WEBHOOK:
-        notifier = FeishuNotifier(_FEISHU_WEBHOOK)
+    if feishu_webhook:
+        notifier = FeishuNotifier(feishu_webhook)
         logger.info("飞书通知已启用")
 
     # ── 初始化组件 ──
