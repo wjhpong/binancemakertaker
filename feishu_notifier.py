@@ -52,18 +52,18 @@ class FeishuNotifier:
         symbol: str,
         level_idx: int,
         price: float,
-        qty: float,
-        filled_usdt: float,
-        total_filled_usdt: float,
-        total_budget: float,
+        filled_base: float,
+        filled_quote: float,
+        total_filled_base: float,
+        total_budget_base: float,
     ) -> None:
         """现货买单成交通知。"""
-        pct = total_filled_usdt / total_budget * 100 if total_budget > 0 else 0
+        pct = total_filled_base / total_budget_base * 100 if total_budget_base > 0 else 0
         text = (
             f"[现货成交] {symbol}\n"
-            f"档位: 买{level_idx} | 价格: {price} | 数量: {qty:.2f}\n"
-            f"本次金额: {filled_usdt:.2f}U\n"
-            f"累计进度: {total_filled_usdt:.2f} / {total_budget:.0f}U ({pct:.1f}%)"
+            f"档位: 买{level_idx} | 价格: {price} | 数量: {filled_base:.4f}\n"
+            f"本次成交额: {filled_quote:.2f}U\n"
+            f"累计进度: {total_filled_base:.4f} / {total_budget_base:.4f} 币 ({pct:.1f}%)"
         )
         threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
 
@@ -92,7 +92,7 @@ class FeishuNotifier:
     def notify_start(
         self,
         symbol: str,
-        total_budget: float,
+        total_budget_base: float,
         levels: str,
         testnet: bool,
     ) -> None:
@@ -101,21 +101,21 @@ class FeishuNotifier:
         text = (
             f"[启动] 套利机器人已启动\n"
             f"环境: {env} | 交易对: {symbol}\n"
-            f"总预算: {total_budget:.0f}U | 挂单档位: {levels}"
+            f"总预算: {total_budget_base:.4f} 币 | 挂单档位: {levels}"
         )
         threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
 
     def notify_stop(
         self,
-        total_filled_usdt: float,
-        total_budget: float,
+        total_filled_base: float,
+        total_budget_base: float,
         naked_exposure: float,
     ) -> None:
         """机器人停止通知。"""
-        pct = total_filled_usdt / total_budget * 100 if total_budget > 0 else 0
+        pct = total_filled_base / total_budget_base * 100 if total_budget_base > 0 else 0
         lines = [
             f"[停止] 套利机器人已停止",
-            f"累计成交: {total_filled_usdt:.2f} / {total_budget:.0f}U ({pct:.1f}%)",
+            f"累计成交: {total_filled_base:.4f} / {total_budget_base:.4f} 币 ({pct:.1f}%)",
         ]
         if naked_exposure > 0:
             lines.append(f"裸露仓位: {naked_exposure:.2f} — 请手动处理!")
@@ -123,7 +123,7 @@ class FeishuNotifier:
         # 停止通知同步发送，确保退出前送达
         self.send_text(text)
 
-    def notify_budget_complete(self, total_budget: float) -> None:
+    def notify_budget_complete(self, total_budget_base: float) -> None:
         """预算买满通知。"""
-        text = f"[完成] 已买满 {total_budget:.0f}U 总仓位，机器人停止挂单"
+        text = f"[完成] 已买满 {total_budget_base:.4f} 币总仓位，机器人停止挂单"
         threading.Thread(target=self.send_text, args=(text,), daemon=True).start()

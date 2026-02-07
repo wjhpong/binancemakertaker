@@ -55,7 +55,7 @@ def print_resp(resp: dict) -> None:
     if "paused" in resp:
         state = "暂停" if resp["paused"] else "运行中"
         print(f"状态: {state}")
-        print(f"预算: {resp['used']:.2f} / {resp['budget']:.0f}U (剩余 {resp['remaining']:.2f}U)")
+        print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
         print(f"裸露仓位: {resp['naked_exposure']}")
         orders = resp.get("active_orders", [])
         if orders:
@@ -67,15 +67,35 @@ def print_resp(resp: dict) -> None:
             print("活跃挂单: 无")
 
     elif "budget" in resp and "paused" not in resp:
-        print(f"预算: {resp['used']:.2f} / {resp['budget']:.0f}U (剩余 {resp['remaining']:.2f}U)")
+        print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
+
+
+_MENU = [
+    ("查看状态", "status", []),
+    ("开始挂单", "start", []),
+    ("暂停挂单", "pause", []),
+    ("查看预算", "budget", []),
+    ("修改预算", None, []),      # 需要额外输入
+    ("停止机器人", "stop", []),
+    ("退出", None, []),
+]
+
+
+def _print_menu() -> None:
+    print()
+    for i, (label, *_) in enumerate(_MENU, 1):
+        print(f"  {i}. {label}")
+    print()
 
 
 def interactive() -> None:
-    """交互式命令行。"""
-    print("套利机器人远程控制 (输入 help 查看命令, quit 退出)")
+    """交互式数字菜单。"""
+    print("套利机器人远程控制")
+    _print_menu()
+
     while True:
         try:
-            line = input("> ").strip()
+            line = input("请选择 [1-7]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -83,26 +103,39 @@ def interactive() -> None:
         if not line:
             continue
 
-        parts = line.split()
-        cmd = parts[0].lower()
-
-        if cmd in ("quit", "exit", "q"):
-            break
-
-        if cmd == "help":
-            print(
-                "  start       恢复挂单\n"
-                "  pause       暂停挂单\n"
-                "  stop        停止机器人\n"
-                "  budget      查看预算\n"
-                "  budget N    修改预算\n"
-                "  status      查看状态\n"
-                "  quit        退出控制台"
-            )
+        try:
+            choice = int(line)
+        except ValueError:
+            print("请输入数字 1-7")
             continue
 
-        resp = send_cmd(cmd, parts[1:])
+        if choice < 1 or choice > len(_MENU):
+            print("请输入数字 1-7")
+            continue
+
+        label, cmd, args = _MENU[choice - 1]
+
+        # 退出
+        if choice == 7:
+            break
+
+        # 修改预算 —— 需要输入币数量
+        if choice == 5:
+            try:
+                amt = input("请输入新预算（币数量）: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not amt:
+                continue
+            resp = send_cmd("budget", [amt])
+            print_resp(resp)
+            _print_menu()
+            continue
+
+        resp = send_cmd(cmd, args)
         print_resp(resp)
+        _print_menu()
 
 
 def main() -> None:

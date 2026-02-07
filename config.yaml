@@ -7,8 +7,8 @@ strategy:
   symbol_spot: ASTERUSDT
   symbol_fut: ASTERUSDT
   tick_size_spot: 0.001     # 现货最小价格变动
-  total_budget: 4000        # 总买入金额 (USDT)
-  budget_pct: 0.01          # 单笔不超过总金额的 1%
+  total_budget: 4000        # 总预算（币数量）
+  budget_pct: 0.01          # 单笔不超过总预算的 1%
   depth_ratio: 0.3          # 单笔不超过该档深度的 30%
   min_order_qty: 1          # 最小下单量 (ASTER) — 合约最小1
   lot_size: 1               # 合约 stepSize=1 (整数)，现货 stepSize=0.01，取大

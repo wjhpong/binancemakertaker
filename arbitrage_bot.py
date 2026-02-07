@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import logging
-import queue
+import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import queue
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +37,8 @@ class StrategyConfig:
     symbol_spot: str
     symbol_fut: str
     tick_size_spot: float
-    total_budget: float             # 总买入金额 (USDT)
-    budget_pct: float = 0.01        # 每轮总预算不超过总金额的 1%
+    total_budget: float             # 总预算（币数量）
+    budget_pct: float = 0.01        # 每轮总预算不超过总预算的 1%
     depth_ratio: float = 0.3        # 单档不超过该档深度的 30%
     min_order_qty: float = 0.00001
     lot_size: float = 0.00001
@@ -76,6 +79,7 @@ class LevelOrder:
     order_id: str
     price: float
     qty: float
+    accounted_qty: float = 0.0
     hedged_qty: float = 0.0
 
 
@@ -88,47 +92,144 @@ class SpotFuturesArbitrageBot:
         trade_logger=None,
         fill_queue: Optional[queue.Queue] = None,
     ) -> None:
+        from fill_handler import FillHandler
+
         self.adapter = adapter
         self.fee = fee
         self.cfg = cfg
         self.trade_logger = trade_logger
-        self.fill_queue = fill_queue
+        self._state_lock = threading.RLock()
 
         # 多档挂单状态
         self._active_orders: dict[str, LevelOrder] = {}   # order_id → LevelOrder
         self._level_to_oid: dict[int, str] = {}            # level_idx → order_id
 
-        self.naked_exposure: float = 0.0
-        self._total_filled_usdt: float = 0.0  # 累计已成交金额(USDT)
         self._running: bool = True
         self._paused: bool = False
 
         # 飞书通知器（可选）
-        self.notifier = None
+        self._notifier = None
+
+        # 成交检测 + 对冲（拆分到 fill_handler.py）
+        self.fh = FillHandler(
+            adapter=adapter,
+            cfg=cfg,
+            active_orders=self._active_orders,
+            fill_queue=fill_queue,
+            trade_logger=trade_logger,
+        )
+        self.fh._on_order_fully_filled = self._on_order_fully_filled
+
+    @property
+    def notifier(self):
+        return self._notifier
+
+    @notifier.setter
+    def notifier(self, value) -> None:
+        self._notifier = value
+        self.fh.notifier = value
+
+    def _on_order_fully_filled(self, oid: str, order: LevelOrder) -> None:
+        """回调：FillHandler 检测到订单完全成交时清理索引。"""
+        with self._state_lock:
+            self._level_to_oid.pop(order.level_idx, None)
+            self._active_orders.pop(oid, None)
+
+    @property
+    def naked_exposure(self) -> float:
+        return self.fh.naked_exposure
+
+    @naked_exposure.setter
+    def naked_exposure(self, value: float) -> None:
+        self.fh.naked_exposure = value
+
+    @property
+    def _total_filled_usdt(self) -> float:
+        return self.fh.total_filled_usdt
+
+    @_total_filled_usdt.setter
+    def _total_filled_usdt(self, value: float) -> None:
+        self.fh.total_filled_usdt = value
+
+    @property
+    def _total_filled_base(self) -> float:
+        return self.fh.total_filled_base
+
+    @_total_filled_base.setter
+    def _total_filled_base(self, value: float) -> None:
+        self.fh.total_filled_base = value
 
     def stop(self) -> None:
-        self._running = False
+        with self._state_lock:
+            self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        with self._state_lock:
+            return self._running
 
     def pause(self) -> None:
         """暂停挂单（撤销所有挂单，但不退出主循环）。"""
-        self._paused = True
+        with self._state_lock:
+            self._paused = True
         logger.info("[CMD] 暂停挂单")
 
     def resume(self) -> None:
         """恢复挂单。"""
-        self._paused = False
+        with self._state_lock:
+            self._paused = False
         logger.info("[CMD] 恢复挂单")
 
     @property
     def is_paused(self) -> bool:
-        return self._paused
+        with self._state_lock:
+            return self._paused
 
     def set_budget(self, new_budget: float) -> None:
-        """运行时修改总预算。"""
+        """运行时修改总预算（币数量）。"""
         from dataclasses import replace
-        old = self.cfg.total_budget
-        self.cfg = replace(self.cfg, total_budget=new_budget)
-        logger.info("[CMD] 总预算从 %.0fU 改为 %.0fU", old, new_budget)
+        with self._state_lock:
+            old = self.cfg.total_budget
+            self.cfg = replace(self.cfg, total_budget=new_budget)
+            self.fh.cfg = self.cfg
+        logger.info("[CMD] 总预算从 %.4f 币 改为 %.4f 币", old, new_budget)
+
+    @property
+    def total_filled_usdt(self) -> float:
+        return self._total_filled_usdt
+
+    @property
+    def total_filled_base(self) -> float:
+        return self._total_filled_base
+
+    def get_level_weights(self) -> dict[int, float]:
+        return dict(self._LEVEL_WEIGHTS)
+
+    def get_active_orders_snapshot(self) -> list[dict]:
+        with self._state_lock:
+            return [
+                {
+                    "id": oid,
+                    "level": order.level_idx,
+                    "price": order.price,
+                    "qty": order.qty,
+                    "hedged": order.hedged_qty,
+                }
+                for oid, order in self._active_orders.items()
+            ]
+
+    def get_status_snapshot(self) -> dict:
+        with self._state_lock:
+            remaining = self._remaining_budget()
+            return {
+                "paused": self._paused,
+                "budget": self.cfg.total_budget,
+                "used": round(self._total_filled_base, 6),
+                "remaining": round(remaining, 6),
+                "used_base": round(self._total_filled_base, 6),
+                "naked_exposure": round(self.naked_exposure, 4),
+                "active_orders": self.get_active_orders_snapshot(),
+            }
 
     # ── 多档选档 + 深度加权分配 ───────────────────────────────
 
@@ -150,9 +251,9 @@ class SpotFuturesArbitrageBot:
 
         min_spread = self.fee.min_spread
         remaining = self._remaining_budget()
-        if remaining < 1.0:
-            logger.info("[BUDGET] 已买满 %.2fU / %.2fU，停止挂单",
-                        self._total_filled_usdt, self.cfg.total_budget)
+        if remaining <= 0:
+            logger.info("[BUDGET] 已买满 %.6f 币 / %.6f 币，停止挂单",
+                        self._total_filled_base, self.cfg.total_budget)
             if self.notifier:
                 self.notifier.notify_budget_complete(self.cfg.total_budget)
             return []
@@ -170,7 +271,7 @@ class SpotFuturesArbitrageBot:
             if spread < min_spread:
                 continue
 
-            qty = (cycle_budget * weight) / bid_price
+            qty = cycle_budget * weight
 
             # 深度上限约束
             depth_cap = level_qty * self.cfg.depth_ratio
@@ -204,12 +305,26 @@ class SpotFuturesArbitrageBot:
                 return True
         return False
 
+    def _orders_below_min_spread(self, fut_bid: float) -> bool:
+        """检查当前挂单是否已低于最小利润护栏。"""
+        if fut_bid <= 0:
+            return False
+        for order in self._active_orders.values():
+            spread = (fut_bid - order.price) / order.price
+            if spread < self.fee.min_spread:
+                logger.info(
+                    "[GUARD] 买%d 挂单 spread=%.4fbps 低于门槛 %.4fbps，触发撤单",
+                    order.level_idx, spread * 10000, self.fee.min_spread * 10000,
+                )
+                return True
+        return False
+
     def _remaining_budget(self) -> float:
-        """剩余可用预算(USDT)。"""
-        return max(0.0, self.cfg.total_budget - self._total_filled_usdt)
+        """剩余可用预算（币数量）。"""
+        return max(0.0, self.cfg.total_budget - self._total_filled_base)
 
     def _need_reprice_level(self, level_idx: int, new_price: float, new_qty: float) -> bool:
-        """检查指定档位是否需要改单。只在价格变化时触发，深度波动不触发改单。
+        """检查指定档位是否需要改单。价格或数量变化都可触发改单。
 
         阈值 = max(reprice_bps 计算值, 3 × tick_size)，避免小价格币种频繁改单。
         """
@@ -222,13 +337,12 @@ class SpotFuturesArbitrageBot:
         bps_threshold = order.price * (self.cfg.reprice_bps / 10000.0)
         tick_threshold = self.cfg.tick_size_spot * 3  # 至少变动3个tick才改单
         threshold = max(bps_threshold, tick_threshold)
-        return abs(new_price - order.price) >= threshold
+        price_changed = abs(new_price - order.price) >= threshold
+        qty_changed = abs(new_qty - order.qty) >= self.cfg.lot_size / 2
+        return price_changed or qty_changed
 
     def _cancel_level_order(self, level_idx: int) -> float:
-        """取消指定档位的挂单，返回发现的未对冲成交量。不清理字典——调用方负责。
-
-        通过 WS fill_queue 检测成交（避免 REST 查单消耗 rate limit）。
-        """
+        """取消指定档位的挂单，返回发现的未对冲成交量。不清理字典——调用方负责。"""
         oid = self._level_to_oid.get(level_idx)
         if oid is None:
             return 0.0
@@ -236,24 +350,14 @@ class SpotFuturesArbitrageBot:
         if order is None:
             return 0.0
 
-        # 先消化 fill_queue 里该订单的成交事件
-        unhedged = 0.0
-        ws_fills = self._drain_fill_queue()
-        if oid in ws_fills:
-            new_fill = ws_fills[oid] - order.hedged_qty
-            if new_fill > 1e-12:
-                unhedged += new_fill
-                order.hedged_qty = ws_fills[oid]
+        # 撤单前检测成交
+        unhedged = self.fh.detect_fills_on_cancel(oid, order)
 
         # 撤单
         self.adapter.cancel_order(self.cfg.symbol_spot, oid)
 
-        # 撤单后再消化一次 fill_queue（捕获撤单瞬间的竞态成交）
-        ws_fills = self._drain_fill_queue()
-        if oid in ws_fills:
-            new_fill = ws_fills[oid] - order.hedged_qty
-            if new_fill > 1e-12:
-                unhedged += new_fill
+        # 撤单后再检测一次（捕获撤单瞬间的竞态成交）
+        unhedged += self.fh.detect_fills_on_cancel(oid, order)
 
         return unhedged
 
@@ -329,11 +433,11 @@ class SpotFuturesArbitrageBot:
         # 3. 先对冲取消过程发现的成交
         if total_unhedged > 1e-12:
             logger.info("[SYNC] 批量对冲撤单发现的成交: qty=%.4f", total_unhedged)
-            success = self._try_hedge(total_unhedged)
+            success, _ = self.fh.try_hedge(total_unhedged)
             if not success:
                 remaining = self._cancel_all_orders()
                 if remaining > 1e-12:
-                    self._try_hedge(remaining)
+                    self.fh.try_hedge(remaining)
                 return False
 
         # 4. 有裸露仓位则暂停
@@ -349,175 +453,16 @@ class SpotFuturesArbitrageBot:
 
         return True
 
-    # ── 成交检测 + 批量对冲 ───────────────────────────────────
-
-    def _drain_fill_queue(self) -> dict[str, float]:
-        """从 WS fill_queue 读取所有活跃订单的成交事件。
-
-        返回 {order_id: 最新累计成交量}。
-        """
-        if self.fill_queue is None:
-            return {}
-        fills: dict[str, float] = {}
-        while True:
-            try:
-                event = self.fill_queue.get_nowait()
-            except queue.Empty:
-                break
-            oid = event.get("order_id")
-            if oid in self._active_orders:
-                fills[oid] = event["filled_qty"]
-                order = self._active_orders[oid]
-                logger.info(
-                    "[WS_FILL] 买%d order_id=%s 累计=%s, 本次=%s @ %s",
-                    order.level_idx, oid, event["filled_qty"],
-                    event["last_filled_qty"], event["last_filled_price"],
-                )
-            else:
-                logger.debug("[WS_FILL] 忽略非活跃订单: %s", oid)
-        return fills
+    # ── 成交检测 + 对冲（委托 fill_handler.py） ─────────────
 
     def _check_fills_and_hedge(self) -> None:
-        """检查所有活跃订单成交情况，批量对冲。
+        self.fh.check_fills_and_hedge()
 
-        优先使用 WS fill_queue（零 REST 开销），REST 仅在无 fill_queue 时使用。
-        """
-        if not self._active_orders:
-            return
-
-        # 优先 WS fill_queue
-        if self.fill_queue is not None:
-            order_fills = self._drain_fill_queue()
-        else:
-            # 无 WS 时回退 REST
-            order_fills = {}
-            for oid in list(self._active_orders.keys()):
-                filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
-                if filled >= 0:
-                    order_fills[oid] = filled
-
-        # 汇总新增成交
-        total_new_fill = 0.0
-        fully_filled: list[str] = []
-
-        for oid, cum_filled in order_fills.items():
-            order = self._active_orders.get(oid)
-            if order is None:
-                continue
-            new_fill = cum_filled - order.hedged_qty
-            if new_fill > 1e-12:
-                total_new_fill += new_fill
-
-            if cum_filled >= order.qty - 1e-12:
-                fully_filled.append(oid)
-
-        # 批量对冲
-        if total_new_fill > 1e-12:
-            success = self._try_hedge(total_new_fill)
-            if success:
-                for oid, cum_filled in order_fills.items():
-                    order = self._active_orders.get(oid)
-                    if order is None:
-                        continue
-                    new_fill = cum_filled - order.hedged_qty
-                    if new_fill > 1e-12:
-                        # 累计成交金额
-                        self._total_filled_usdt += new_fill * order.price
-                        if self.trade_logger:
-                            self.trade_logger.log_spot_fill(
-                                self.cfg.symbol_spot, oid, order.price, new_fill,
-                            )
-                    order.hedged_qty = cum_filled
-                    # 飞书通知
-                    if self.notifier and new_fill > 1e-12:
-                        self.notifier.notify_fill(
-                            symbol=self.cfg.symbol_spot,
-                            level_idx=order.level_idx,
-                            price=order.price,
-                            qty=new_fill,
-                            filled_usdt=new_fill * order.price,
-                            total_filled_usdt=self._total_filled_usdt,
-                            total_budget=self.cfg.total_budget,
-                        )
-                logger.info("[PROGRESS] 累计成交: %.2fU / %.2fU",
-                            self._total_filled_usdt, self.cfg.total_budget)
-
-        # 清理完全成交的订单
-        for oid in fully_filled:
-            order = self._active_orders.get(oid)
-            if order and order.hedged_qty >= order.qty - 1e-12:
-                logger.info(
-                    "买%d 完全成交: order_id=%s, price=%.4f, qty=%.2f",
-                    order.level_idx, oid, order.price, order.qty,
-                )
-                self._level_to_oid.pop(order.level_idx, None)
-                self._active_orders.pop(oid, None)
-
-    # ── 对冲 ──────────────────────────────────────────────────
-
-    def _try_hedge(self, qty: float) -> bool:
-        if qty <= 0:
-            return True
-        # 按合约 lot_size 取整
-        lot = self.cfg.lot_size
-        hedge_qty = int(qty / lot) * lot
-        if hedge_qty < lot:
-            logger.debug("[HEDGE] 累积量 %.4f < lot_size=%s，暂不对冲", qty, lot)
-            return True
-
-        for i in range(self.cfg.max_retry):
-            try:
-                hedge_id = self.adapter.place_futures_market_sell(self.cfg.symbol_fut, hedge_qty)
-                hedge_price = getattr(self.adapter, "last_hedge_avg_price", None)
-                logger.info("[HEDGE] 合约对冲成功: qty=%s, order_id=%s, price=%s",
-                            hedge_qty, hedge_id, hedge_price)
-                if self.trade_logger:
-                    self.trade_logger.log_hedge(
-                        self.cfg.symbol_fut, hedge_id, hedge_qty, success=True, price=hedge_price
-                    )
-                if self.notifier:
-                    self.notifier.notify_hedge(
-                        self.cfg.symbol_fut, hedge_qty, hedge_price, success=True,
-                    )
-                return True
-            except Exception as exc:
-                logger.warning("[HEDGE] 重试 %d/%d 失败: %s", i + 1, self.cfg.max_retry, exc)
-                if i + 1 < self.cfg.max_retry:
-                    time.sleep(0.15)
-
-        logger.critical("[HEDGE] 对冲彻底失败! qty=%s 转入裸露仓位", hedge_qty)
-        self.naked_exposure += hedge_qty
-        if self.trade_logger:
-            self.trade_logger.log_hedge(self.cfg.symbol_fut, "", hedge_qty, success=False)
-        if self.notifier:
-            self.notifier.notify_hedge(self.cfg.symbol_fut, hedge_qty, None, success=False)
-        return False
+    def _try_hedge(self, qty: float) -> tuple[bool, float]:
+        return self.fh.try_hedge(qty)
 
     def _try_recover_naked_exposure(self) -> bool:
-        if self.naked_exposure <= 0:
-            return True
-        logger.warning("[RECOVER] 尝试恢复裸露仓位: %s", self.naked_exposure)
-        for i in range(self.cfg.max_retry):
-            try:
-                hedge_id = self.adapter.place_futures_market_sell(
-                    self.cfg.symbol_fut, self.naked_exposure
-                )
-                hedge_price = getattr(self.adapter, "last_hedge_avg_price", None)
-                logger.info("[RECOVER] 裸露仓位已对冲: qty=%s, order_id=%s, price=%s",
-                            self.naked_exposure, hedge_id, hedge_price)
-                if self.trade_logger:
-                    self.trade_logger.log_hedge(
-                        self.cfg.symbol_fut, hedge_id, self.naked_exposure,
-                        success=True, price=hedge_price,
-                    )
-                self.naked_exposure = 0.0
-                return True
-            except Exception as exc:
-                logger.warning("[RECOVER] 重试 %d/%d 失败: %s", i + 1, self.cfg.max_retry, exc)
-                if i + 1 < self.cfg.max_retry:
-                    time.sleep(0.15)
-        logger.critical("[RECOVER] 裸露仓位恢复失败，等待下一轮重试")
-        return False
+        return self.fh.try_recover_naked_exposure()
 
     # ── 主循环 ────────────────────────────────────────────────
 
@@ -554,6 +499,14 @@ class SpotFuturesArbitrageBot:
                 spot_bids = self.adapter.get_spot_depth(self.cfg.symbol_spot)
 
                 if not spot_bids:
+                    time.sleep(self.cfg.poll_interval_sec)
+                    continue
+
+                # 利润护栏：任一活跃挂单低于门槛则先撤再对冲
+                if self._active_orders and self._orders_below_min_spread(fut_bid):
+                    unhedged = self._cancel_all_orders()
+                    if unhedged > 1e-12:
+                        self._try_hedge(unhedged)
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 

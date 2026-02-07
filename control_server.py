@@ -51,7 +51,7 @@ class ControlServer:
         logger.info("控制服务器已停止")
 
     def _serve(self) -> None:
-        while self.bot._running:
+        while self.bot.is_running:
             try:
                 conn, _ = self._sock.accept()
             except socket.timeout:
@@ -102,40 +102,26 @@ class ControlServer:
 
         elif cmd == "budget":
             if not args:
+                snap = bot.get_status_snapshot()
                 return {
                     "ok": True,
-                    "budget": bot.cfg.total_budget,
-                    "used": round(bot._total_filled_usdt, 2),
-                    "remaining": round(bot._remaining_budget(), 2),
+                    "budget": snap["budget"],
+                    "used": snap["used"],
+                    "remaining": snap["remaining"],
                 }
             try:
                 new_budget = float(args[0])
                 if new_budget <= 0:
                     return {"ok": False, "msg": "预算必须 > 0"}
                 bot.set_budget(new_budget)
-                return {"ok": True, "msg": f"总预算已设为 {new_budget:.0f}U"}
+                return {"ok": True, "msg": f"总预算已设为 {new_budget:.6f} 币"}
             except ValueError:
                 return {"ok": False, "msg": "无效数字"}
 
         elif cmd == "status":
-            orders = []
-            for oid, order in bot._active_orders.items():
-                orders.append({
-                    "level": order.level_idx,
-                    "price": order.price,
-                    "qty": order.qty,
-                    "hedged": order.hedged_qty,
-                    "id": oid,
-                })
-            return {
-                "ok": True,
-                "paused": bot.is_paused,
-                "budget": bot.cfg.total_budget,
-                "used": round(bot._total_filled_usdt, 2),
-                "remaining": round(bot._remaining_budget(), 2),
-                "naked_exposure": round(bot.naked_exposure, 4),
-                "active_orders": orders,
-            }
+            snap = bot.get_status_snapshot()
+            snap["ok"] = True
+            return snap
 
         else:
             return {"ok": False, "msg": f"未知命令: {cmd}"}

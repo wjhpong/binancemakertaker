@@ -23,7 +23,7 @@ logger = logging.getLogger("run")
 
 _FEISHU_WEBHOOK = os.environ.get(
     "FEISHU_WEBHOOK",
-    "https://open.feishu.cn/open-apis/bot/v2/hook/da41fa3f-a538-40a8-a226-4b9de2e3e083",
+    "",
 )
 
 
@@ -40,9 +40,9 @@ def main() -> None:
     if len(sys.argv) > 1:
         try:
             budget_override = float(sys.argv[1])
-            logger.info("命令行指定总预算: %.0fU", budget_override)
+            logger.info("命令行指定总预算: %.6f 币", budget_override)
         except ValueError:
-            print(f"用法: python run.py [总预算USDT]  例如: python run.py 8000")
+            print("用法: python run.py [总预算币数量]  例如: python run.py 8000")
             sys.exit(1)
 
     # ── 加载配置 ──
@@ -66,7 +66,7 @@ def main() -> None:
     logger.info("maker返佣=%.4f%% | taker费=%.4f%% | 净成本=%.4f%% | 最小利润=%sbps",
                 fee.spot_maker * 100, fee.fut_taker * 100,
                 fee.net_cost * 100, fee.min_profit_bps)
-    logger.info("挂单范围: 买%d ~ 买%d | budget=%sU, 单笔<=%s%%金额, <=%s%%档深",
+    logger.info("挂单范围: 买%d ~ 买%d | budget=%.6f 币, 单笔<=%s%%预算, <=%s%%档深",
                 cfg.min_level, cfg.max_level, cfg.total_budget,
                 cfg.budget_pct * 100, cfg.depth_ratio * 100)
     logger.info("=" * 60)
@@ -126,7 +126,9 @@ def main() -> None:
 
     # 飞书启动通知
     if notifier:
-        level_desc = ", ".join(f"买{k}={int(v*100)}%" for k, v in bot._LEVEL_WEIGHTS.items())
+        level_desc = ", ".join(
+            f"买{k}={int(v * 100)}%" for k, v in bot.get_level_weights().items()
+        )
         notifier.notify_start(cfg.symbol_spot, cfg.total_budget, level_desc, testnet)
 
     # ── 信号处理 ──
@@ -148,12 +150,12 @@ def main() -> None:
     finally:
         ctrl.stop()
         # 清理：撤销所有残留挂单
-        for oid, order in list(bot._active_orders.items()):
+        for order in bot.get_active_orders_snapshot():
             try:
-                adapter.cancel_order(cfg.symbol_spot, oid)
-                logger.info("已撤销残留挂单: 买%d order_id=%s", order.level_idx, oid)
+                adapter.cancel_order(cfg.symbol_spot, order["id"])
+                logger.info("已撤销残留挂单: 买%d order_id=%s", order["level"], order["id"])
             except Exception:
-                logger.exception("退出时撤单失败: order_id=%s", oid)
+                logger.exception("退出时撤单失败: order_id=%s", order["id"])
 
         # 警告裸露仓位
         if bot.naked_exposure > 0:
@@ -161,7 +163,7 @@ def main() -> None:
 
         # 飞书停止通知
         if notifier:
-            notifier.notify_stop(bot._total_filled_usdt, cfg.total_budget, bot.naked_exposure)
+            notifier.notify_stop(bot.total_filled_base, cfg.total_budget, bot.naked_exposure)
 
         ws.stop()
         trade_log.close()
