@@ -90,6 +90,7 @@ def main() -> None:
         fee=fee,
         cfg=cfg,
         trade_logger=trade_log,
+        fill_queue=ws.fill_queue,
     )
 
     # ── 信号处理 ──

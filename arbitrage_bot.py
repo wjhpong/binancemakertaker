@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -87,11 +88,13 @@ class SpotFuturesArbitrageBot:
         fee: FeeConfig,
         cfg: StrategyConfig,
         trade_logger=None,
+        fill_queue: Optional[queue.Queue] = None,
     ) -> None:
         self.adapter = adapter
         self.fee = fee
         self.cfg = cfg
         self.trade_logger = trade_logger
+        self.fill_queue = fill_queue  # WS 用户数据流成交推送队列
         self.current_spot_order_id: Optional[str] = None
         self.last_quote_price: Optional[float] = None
         self._current_order_qty: float = 0.0   # 当前挂单数量（动态计算）
@@ -102,6 +105,31 @@ class SpotFuturesArbitrageBot:
     def stop(self) -> None:
         """由信号处理器调用，通知主循环退出。"""
         self._running = False
+
+    def _drain_fill_queue(self) -> float:
+        """从 WS fill_queue 中读取当前订单的累计成交量。
+
+        返回累计成交量（来自 WS 推送的 filled_qty 字段）。
+        如果没有 fill_queue 或无相关事件，返回 -1 表示无数据。
+        """
+        if self.fill_queue is None:
+            return -1.0
+        latest_filled = -1.0
+        while True:
+            try:
+                event = self.fill_queue.get_nowait()
+            except queue.Empty:
+                break
+            # 只处理当前订单的成交事件
+            if (self.current_spot_order_id and
+                    event.get("order_id") == self.current_spot_order_id):
+                latest_filled = event["filled_qty"]  # 累计成交量
+                logger.info("[WS_FILL] order_id=%s 累计成交=%s, 本次=%s @ %s",
+                            event["order_id"], event["filled_qty"],
+                            event["last_filled_qty"], event["last_filled_price"])
+            else:
+                logger.debug("[WS_FILL] 忽略非当前订单事件: %s", event.get("order_id"))
+        return latest_filled
 
     # ── 动态数量 ──────────────────────────────────────────────
 
@@ -389,15 +417,19 @@ class SpotFuturesArbitrageBot:
                         time.sleep(self.cfg.poll_interval_sec)
                         continue
 
-                # 检查成交
+                # 检查成交：优先 REST，REST 失败时回退 WS fill_queue
                 if self.current_spot_order_id:
                     filled = self.adapter.get_order_filled_qty(
                         self.cfg.symbol_spot, self.current_spot_order_id
                     )
-                    # 哨兵值 -1 表示订单查不到，跳过本轮检查
+                    # REST 返回哨兵值 -1 → 回退到 WS fill_queue
                     if filled < 0:
-                        logger.debug("查单返回哨兵值，跳过成交检查")
+                        filled = self._drain_fill_queue()
                     else:
+                        # REST 成功时也清空 fill_queue 防止堆积
+                        self._drain_fill_queue()
+
+                    if filled >= 0:
                         new_fill = filled - self.hedged_qty
                         if new_fill > 1e-12:
                             success = self._try_hedge(new_fill)
