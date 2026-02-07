@@ -86,16 +86,6 @@ class FillHandler:
             self.trade_logger.log_spot_fill(
                 self.cfg.symbol_spot, order.order_id, order.price, new_fill
             )
-        if self.notifier:
-            self.notifier.notify_fill(
-                symbol=self.cfg.symbol_spot,
-                level_idx=order.level_idx,
-                price=order.price,
-                filled_base=new_fill,
-                filled_quote=new_fill * order.price,
-                total_filled_base=self.total_filled_base,
-                total_budget_base=self.cfg.total_budget,
-            )
         order.accounted_qty = cum_filled
         return new_fill
 
@@ -227,8 +217,10 @@ class FillHandler:
                         self.cfg.symbol_fut, hedge_id, hedge_qty, success=True, price=hedge_price
                     )
                 if self.notifier:
-                    self.notifier.notify_hedge(
-                        self.cfg.symbol_fut, hedge_qty, hedge_price, success=True,
+                    self.notifier.notify_progress(
+                        symbol=self.cfg.symbol_spot,
+                        total_spot_filled_base=self.total_filled_base,
+                        total_perp_hedged_base=self.total_hedged_base + hedge_qty,
                     )
                 self.total_hedged_base += hedge_qty
                 if residual > 1e-12:
@@ -248,8 +240,6 @@ class FillHandler:
         self.naked_exposure += qty
         if self.trade_logger:
             self.trade_logger.log_hedge(self.cfg.symbol_fut, "", hedge_qty, success=False)
-        if self.notifier:
-            self.notifier.notify_hedge(self.cfg.symbol_fut, hedge_qty, None, success=False)
         return False, 0.0
 
     # ── 裸露仓位恢复 ─────────────────────────────────────────
@@ -280,6 +270,12 @@ class FillHandler:
                     )
                 self.total_hedged_base += hedge_qty
                 self.naked_exposure = max(0.0, self.naked_exposure - hedge_qty)
+                if self.notifier:
+                    self.notifier.notify_progress(
+                        symbol=self.cfg.symbol_spot,
+                        total_spot_filled_base=self.total_filled_base,
+                        total_perp_hedged_base=self.total_hedged_base,
+                    )
                 return True
             except Exception as exc:
                 logger.warning("[RECOVER] 重试 %d/%d 失败: %s", i + 1, self.cfg.max_retry, exc)

@@ -264,8 +264,6 @@ class SpotFuturesArbitrageBot:
         if remaining <= 0:
             logger.info("[BUDGET] 已买满 %.6f 币 / %.6f 币，停止挂单",
                         self._total_filled_base, self.cfg.total_budget)
-            if self.notifier:
-                self.notifier.notify_budget_complete(self.cfg.total_budget)
             return []
         cycle_budget = min(self.cfg.total_budget * self.cfg.budget_pct, remaining)
         lot = self.cfg.lot_size

@@ -124,13 +124,6 @@ def main() -> None:
     )
     bot.notifier = notifier
 
-    # 飞书启动通知
-    if notifier:
-        level_desc = ", ".join(
-            f"买{k}={int(v * 100)}%" for k, v in bot.get_level_weights().items()
-        )
-        notifier.notify_start(cfg.symbol_spot, cfg.total_budget, level_desc, testnet)
-
     # ── 信号处理 ──
     def shutdown(signum, _frame):
         sig_name = signal.Signals(signum).name
@@ -160,10 +153,6 @@ def main() -> None:
         # 警告裸露仓位
         if bot.naked_exposure > 0:
             logger.critical("!!! 退出时存在裸露仓位: %s — 请手动处理 !!!", bot.naked_exposure)
-
-        # 飞书停止通知
-        if notifier:
-            notifier.notify_stop(bot.total_filled_base, cfg.total_budget, bot.naked_exposure)
 
         ws.stop()
         trade_log.close()

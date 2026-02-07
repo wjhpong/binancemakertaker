@@ -1,14 +1,11 @@
-"""飞书群机器人 Webhook 通知器 —— 推送成交/对冲/异常信息。"""
+"""飞书群机器人 Webhook 通知器 —— 仅推送成交进度摘要。"""
 
 from __future__ import annotations
 
 import json
 import logging
 import threading
-import time
 import urllib.request
-import urllib.error
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,85 +42,16 @@ class FeishuNotifier:
         payload = {"msg_type": "text", "content": {"text": text}}
         return self._post(payload)
 
-    # ── 业务通知 ──────────────────────────────────────────────
-
-    def notify_fill(
+    def notify_progress(
         self,
         symbol: str,
-        level_idx: int,
-        price: float,
-        filled_base: float,
-        filled_quote: float,
-        total_filled_base: float,
-        total_budget_base: float,
+        total_spot_filled_base: float,
+        total_perp_hedged_base: float,
     ) -> None:
-        """现货买单成交通知。"""
-        pct = total_filled_base / total_budget_base * 100 if total_budget_base > 0 else 0
+        """推送累计进度（仅现货成交量和永续对冲量）。"""
         text = (
-            f"[现货成交] {symbol}\n"
-            f"档位: 买{level_idx} | 价格: {price} | 数量: {filled_base:.4f}\n"
-            f"本次成交额: {filled_quote:.2f}U\n"
-            f"累计进度: {total_filled_base:.4f} / {total_budget_base:.4f} 币 ({pct:.1f}%)"
+            f"[套利进度] {symbol}\n"
+            f"现货累计成交: {total_spot_filled_base:.4f} 币\n"
+            f"永续累计对冲: {total_perp_hedged_base:.4f} 币"
         )
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
-
-    def notify_hedge(
-        self,
-        symbol: str,
-        qty: float,
-        price: Optional[float],
-        success: bool,
-    ) -> None:
-        """合约对冲通知。"""
-        if success:
-            text = (
-                f"[合约对冲] {symbol}\n"
-                f"数量: {qty:.2f} | 价格: {price or 'N/A'}\n"
-                f"状态: 成功"
-            )
-        else:
-            text = (
-                f"[对冲失败] {symbol}\n"
-                f"数量: {qty:.2f}\n"
-                f"状态: 失败 — 已转入裸露仓位，请检查!"
-            )
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
-
-    def notify_start(
-        self,
-        symbol: str,
-        total_budget_base: float,
-        levels: str,
-        testnet: bool,
-    ) -> None:
-        """机器人启动通知。"""
-        env = "模拟盘" if testnet else "实盘"
-        text = (
-            f"[启动] 套利机器人已启动\n"
-            f"环境: {env} | 交易对: {symbol}\n"
-            f"总预算: {total_budget_base:.4f} 币 | 挂单档位: {levels}"
-        )
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
-
-    def notify_stop(
-        self,
-        total_filled_base: float,
-        total_budget_base: float,
-        naked_exposure: float,
-    ) -> None:
-        """机器人停止通知。"""
-        pct = total_filled_base / total_budget_base * 100 if total_budget_base > 0 else 0
-        lines = [
-            f"[停止] 套利机器人已停止",
-            f"累计成交: {total_filled_base:.4f} / {total_budget_base:.4f} 币 ({pct:.1f}%)",
-        ]
-        if naked_exposure > 0:
-            lines.append(f"裸露仓位: {naked_exposure:.2f} — 请手动处理!")
-        text = "\n".join(lines)
-        # 停止通知同步发送，确保退出前送达
-        self.send_text(text)
-
-    def notify_budget_complete(self, total_budget_base: float) -> None:
-        """预算买满通知。"""
-        text = f"[完成] 已买满 {total_budget_base:.4f} 币总仓位，机器人停止挂单"
         threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
