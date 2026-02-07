@@ -226,10 +226,13 @@ def main() -> None:
 
     # ── 命令行交互线程（仅 TTY 模式） ──
     if sys.stdin.isatty():
+        # TTY 模式下默认暂停，等用户输入 start 后开始
+        bot.pause()
+        print("机器人已就绪，输入 start 开始挂单")
         cmd_thread = threading.Thread(target=_cmd_loop, args=(bot,), daemon=True)
         cmd_thread.start()
     else:
-        logger.info("非交互模式（无 TTY），跳过命令行控制")
+        logger.info("非交互模式（无 TTY），直接开始运行")
 
     # ── 运行 ──
     try:
