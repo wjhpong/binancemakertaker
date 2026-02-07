@@ -171,7 +171,7 @@ class SpotFuturesArbitrageBot:
     # ── 单档操作 ──────────────────────────────────────────────
 
     def _need_reprice_level(self, level_idx: int, new_price: float, new_qty: float) -> bool:
-        """检查指定档位是否需要改单。"""
+        """检查指定档位是否需要改单。只在价格变化时触发，深度波动不触发改单。"""
         oid = self._level_to_oid.get(level_idx)
         if oid is None:
             return True
@@ -179,12 +179,13 @@ class SpotFuturesArbitrageBot:
         if order is None:
             return True
         threshold = order.price * (self.cfg.reprice_bps / 10000.0)
-        price_changed = abs(new_price - order.price) >= threshold
-        qty_changed = abs(new_qty - order.qty) >= self.cfg.lot_size / 2
-        return price_changed or qty_changed
+        return abs(new_price - order.price) >= threshold
 
     def _cancel_level_order(self, level_idx: int) -> float:
-        """取消指定档位的挂单，返回发现的未对冲成交量。不清理字典——调用方负责。"""
+        """取消指定档位的挂单，返回发现的未对冲成交量。不清理字典——调用方负责。
+
+        通过 WS fill_queue 检测成交（避免 REST 查单消耗 rate limit）。
+        """
         oid = self._level_to_oid.get(level_idx)
         if oid is None:
             return 0.0
@@ -192,31 +193,24 @@ class SpotFuturesArbitrageBot:
         if order is None:
             return 0.0
 
+        # 先消化 fill_queue 里该订单的成交事件
         unhedged = 0.0
-
-        # 撤单前查成交
-        try:
-            filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
-            if filled >= 0:
-                new_fill = filled - order.hedged_qty
-                if new_fill > 1e-12:
-                    unhedged += new_fill
-                    order.hedged_qty = filled
-        except Exception:
-            logger.exception("撤单前查单失败: 买%d order_id=%s", level_idx, oid)
+        ws_fills = self._drain_fill_queue()
+        if oid in ws_fills:
+            new_fill = ws_fills[oid] - order.hedged_qty
+            if new_fill > 1e-12:
+                unhedged += new_fill
+                order.hedged_qty = ws_fills[oid]
 
         # 撤单
         self.adapter.cancel_order(self.cfg.symbol_spot, oid)
 
-        # 撤单后竞态检查
-        try:
-            filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
-            if filled >= 0:
-                new_fill = filled - order.hedged_qty
-                if new_fill > 1e-12:
-                    unhedged += new_fill
-        except Exception:
-            logger.exception("撤单后查单失败: 买%d order_id=%s", level_idx, oid)
+        # 撤单后再消化一次 fill_queue（捕获撤单瞬间的竞态成交）
+        ws_fills = self._drain_fill_queue()
+        if oid in ws_fills:
+            new_fill = ws_fills[oid] - order.hedged_qty
+            if new_fill > 1e-12:
+                unhedged += new_fill
 
         return unhedged
 
@@ -344,24 +338,23 @@ class SpotFuturesArbitrageBot:
         return fills
 
     def _check_fills_and_hedge(self) -> None:
-        """检查所有活跃订单成交情况，批量对冲。"""
+        """检查所有活跃订单成交情况，批量对冲。
+
+        优先使用 WS fill_queue（零 REST 开销），REST 仅在无 fill_queue 时使用。
+        """
         if not self._active_orders:
             return
 
-        # REST 查成交 → 失败则回退 WS
-        order_fills: dict[str, float] = {}
-        rest_failed = False
-        for oid in list(self._active_orders.keys()):
-            filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
-            if filled < 0:
-                rest_failed = True
-                break
-            order_fills[oid] = filled
-
-        if rest_failed:
+        # 优先 WS fill_queue
+        if self.fill_queue is not None:
             order_fills = self._drain_fill_queue()
         else:
-            self._drain_fill_queue()
+            # 无 WS 时回退 REST
+            order_fills = {}
+            for oid in list(self._active_orders.keys()):
+                filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
+                if filled >= 0:
+                    order_fills[oid] = filled
 
         # 汇总新增成交
         total_new_fill = 0.0
