@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Binance API error codes
 _ERR_UNKNOWN_ORDER = -2011  # 订单不存在（已成交或已撤销）
+_ERR_ORDER_NOT_FOUND = -2013  # 订单查询不到（测试网可能清理已完成订单）
 
 
 class RateLimiter:
@@ -151,7 +152,7 @@ class BinanceAdapter(ExchangeAdapter):
             bid = self.price_cache.get_futures_bid()
             if bid is not None and not self.price_cache.is_stale():
                 return bid
-            logger.warning("WS 价格缓存过期或为空，回退到 REST")
+            logger.debug("WS 价格缓存过期或为空，回退到 REST")
 
         self._fut_limiter.wait_if_needed(weight=2)
         resp = self.futures.book_ticker(symbol=symbol_fut)
@@ -163,7 +164,7 @@ class BinanceAdapter(ExchangeAdapter):
             bids = self.price_cache.get_spot_bids(n=levels)
             if bids and not self.price_cache.is_spot_depth_stale():
                 return bids
-            logger.warning("WS 现货深度缓存过期或为空，回退到 REST")
+            logger.debug("WS 现货深度缓存过期或为空，回退到 REST")
 
         self._spot_limiter.wait_if_needed(weight=5)
         resp = self.spot.depth(symbol=symbol_spot, limit=levels)
@@ -214,8 +215,16 @@ class BinanceAdapter(ExchangeAdapter):
 
     def get_order_filled_qty(self, symbol: str, order_id: str) -> float:
         self._spot_limiter.wait_if_needed(weight=2)
-        resp = self.spot.get_order(symbol=symbol, orderId=int(order_id))
-        return float(resp["executedQty"])
+        try:
+            resp = self.spot.get_order(symbol=symbol, orderId=int(order_id))
+            return float(resp["executedQty"])
+        except Exception as e:
+            err_str = str(e)
+            if str(_ERR_ORDER_NOT_FOUND) in err_str:
+                # 测试网可能清理已完成订单，假设全部成交
+                logger.warning("查单 -2013: order_id=%s 不存在（可能已完全成交）", order_id)
+                return float("inf")  # 返回 inf 让调用方认为全部成交
+            raise
 
     def place_futures_market_sell(self, symbol_fut: str, qty: float) -> str:
         self._fut_limiter.wait_if_needed(weight=1)
