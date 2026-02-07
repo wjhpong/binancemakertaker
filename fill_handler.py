@@ -42,6 +42,7 @@ class FillHandler:
         self.naked_exposure: float = 0.0
         self.total_filled_usdt: float = 0.0
         self.total_filled_base: float = 0.0
+        self.total_hedged_base: float = 0.0
         self._last_rest_reconcile_ts: float = 0.0
 
     # ── WS 成交事件消费 ──────────────────────────────────────
@@ -229,6 +230,7 @@ class FillHandler:
                     self.notifier.notify_hedge(
                         self.cfg.symbol_fut, hedge_qty, hedge_price, success=True,
                     )
+                self.total_hedged_base += hedge_qty
                 if residual > 1e-12:
                     self.naked_exposure += residual
                     logger.warning(
@@ -276,6 +278,7 @@ class FillHandler:
                         self.cfg.symbol_fut, hedge_id, hedge_qty,
                         success=True, price=hedge_price,
                     )
+                self.total_hedged_base += hedge_qty
                 self.naked_exposure = max(0.0, self.naked_exposure - hedge_qty)
                 return True
             except Exception as exc:

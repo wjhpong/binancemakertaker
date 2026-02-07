@@ -106,6 +106,7 @@ class SpotFuturesArbitrageBot:
 
         self._running: bool = True
         self._paused: bool = False
+        self._requote_all_levels: bool = False
 
         # 飞书通知器（可选）
         self._notifier = None
@@ -134,6 +135,9 @@ class SpotFuturesArbitrageBot:
         with self._state_lock:
             self._level_to_oid.pop(order.level_idx, None)
             self._active_orders.pop(oid, None)
+            # 买二完全成交后，要求撤掉其余档位并重挂买二/买三。
+            if order.level_idx == 2:
+                self._requote_all_levels = True
 
     @property
     def naked_exposure(self) -> float:
@@ -202,6 +206,10 @@ class SpotFuturesArbitrageBot:
     def total_filled_base(self) -> float:
         return self._total_filled_base
 
+    @property
+    def total_hedged_base(self) -> float:
+        return self.fh.total_hedged_base
+
     def get_level_weights(self) -> dict[int, float]:
         return dict(self._LEVEL_WEIGHTS)
 
@@ -227,6 +235,8 @@ class SpotFuturesArbitrageBot:
                 "used": round(self._total_filled_base, 6),
                 "remaining": round(remaining, 6),
                 "used_base": round(self._total_filled_base, 6),
+                "spot_filled_base": round(self._total_filled_base, 6),
+                "perp_hedged_base": round(self.total_hedged_base, 6),
                 "naked_exposure": round(self.naked_exposure, 4),
                 "active_orders": self.get_active_orders_snapshot(),
             }
@@ -538,6 +548,15 @@ class SpotFuturesArbitrageBot:
 
                 # 检查成交 + 批量对冲
                 self._check_fills_and_hedge()
+
+                # 若买二已完全成交，则撤掉其余档位并在下一轮重挂买二/买三
+                if self._requote_all_levels:
+                    self._requote_all_levels = False
+                    unhedged = self._cancel_all_orders()
+                    if unhedged > 1e-12:
+                        self._try_hedge(unhedged)
+                    time.sleep(self.cfg.poll_interval_sec)
+                    continue
 
                 time.sleep(self.cfg.poll_interval_sec)
 
