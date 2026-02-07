@@ -217,9 +217,23 @@ class SpotFuturesArbitrageBot:
     def get_level_weights(self) -> dict[int, float]:
         return dict(self._LEVEL_WEIGHTS)
 
+    def _infer_book_level(self, price: float, spot_bids: list[tuple[float, float]]) -> int | None:
+        """根据最新盘口推断订单当前处于买几。"""
+        if not spot_bids:
+            return None
+        tol = max(self.cfg.tick_size_spot * 0.5, 1e-12)
+        for i, (bid_price, _) in enumerate(spot_bids, start=1):
+            if abs(price - bid_price) <= tol:
+                return i
+        higher = sum(1 for bid_price, _ in spot_bids if bid_price > price + tol)
+        lvl = higher + 1
+        if lvl <= len(spot_bids):
+            return lvl
+        return None
+
     def get_active_orders_snapshot(self) -> list[dict]:
         with self._state_lock:
-            return [
+            orders = [
                 {
                     "id": oid,
                     "level": order.level_idx,
@@ -229,6 +243,19 @@ class SpotFuturesArbitrageBot:
                 }
                 for oid, order in self._active_orders.items()
             ]
+        if not orders:
+            return orders
+
+        spot_bids: list[tuple[float, float]] = []
+        try:
+            spot_bids = self.adapter.get_spot_depth(self.cfg.symbol_spot)
+        except Exception:
+            logger.exception("[STATUS] 获取盘口失败，返回原始档位")
+
+        for order in orders:
+            cur_level = self._infer_book_level(order["price"], spot_bids)
+            order["current_level"] = cur_level
+        return orders
 
     def get_status_snapshot(self) -> dict:
         with self._state_lock:

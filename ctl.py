@@ -63,7 +63,12 @@ def print_resp(resp: dict) -> None:
         if orders:
             print(f"活跃挂单 ({len(orders)}):")
             for o in orders:
-                print(f"  买{o['level']}: price={o['price']}, qty={o['qty']:.2f}, "
+                cur = o.get("current_level")
+                if cur is not None:
+                    level_text = f"买{o['level']}(当前买{cur})"
+                else:
+                    level_text = f"买{o['level']}(当前买5外)"
+                print(f"  {level_text}: price={o['price']}, qty={o['qty']:.2f}, "
                       f"hedged={o['hedged']:.2f}, id={o['id']}")
         else:
             print("活跃挂单: 无")
