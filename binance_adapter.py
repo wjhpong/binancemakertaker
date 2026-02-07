@@ -221,9 +221,10 @@ class BinanceAdapter(ExchangeAdapter):
         except Exception as e:
             err_str = str(e)
             if str(_ERR_ORDER_NOT_FOUND) in err_str:
-                # 测试网可能清理已完成订单，假设全部成交
-                logger.warning("查单 -2013: order_id=%s 不存在（可能已完全成交）", order_id)
-                return float("inf")  # 返回 inf 让调用方认为全部成交
+                # 订单查不到 —— 可能被清理或不存在
+                # 返回 -1 作为哨兵值，让调用方决定如何处理
+                logger.warning("查单 -2013: order_id=%s 不存在，返回哨兵值 -1", order_id)
+                return -1.0
             raise
 
     def place_futures_market_sell(self, symbol_fut: str, qty: float) -> str:

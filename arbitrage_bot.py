@@ -187,6 +187,10 @@ class SpotFuturesArbitrageBot:
             filled = self.adapter.get_order_filled_qty(
                 self.cfg.symbol_spot, self.current_spot_order_id
             )
+            # 哨兵值 -1 表示订单查不到，跳过对冲检查
+            if filled < 0:
+                logger.warning("撤单前查单返回哨兵值，跳过对冲检查")
+                return True
             new_fill = filled - self.hedged_qty
             if new_fill > 1e-12:
                 logger.info("撤单前发现未对冲成交: qty=%s", new_fill)
@@ -211,14 +215,18 @@ class SpotFuturesArbitrageBot:
                 filled = self.adapter.get_order_filled_qty(
                     self.cfg.symbol_spot, self.current_spot_order_id
                 )
-                new_fill = filled - self.hedged_qty
-                if new_fill > 1e-12:
-                    logger.info("撤单后发现最后成交: qty=%s", new_fill)
-                    success = self._try_hedge(new_fill)
-                    if success:
-                        self.hedged_qty = filled
-                    else:
-                        hedge_ok = False
+                # 哨兵值 -1 表示订单查不到，跳过
+                if filled >= 0:
+                    new_fill = filled - self.hedged_qty
+                    if new_fill > 1e-12:
+                        logger.info("撤单后发现最后成交: qty=%s", new_fill)
+                        success = self._try_hedge(new_fill)
+                        if success:
+                            self.hedged_qty = filled
+                        else:
+                            hedge_ok = False
+                else:
+                    logger.warning("撤单后查单返回哨兵值，跳过竞态检查")
             except Exception:
                 logger.exception("撤单后检查成交量失败")
                 hedge_ok = False
@@ -346,14 +354,18 @@ class SpotFuturesArbitrageBot:
                             filled = self.adapter.get_order_filled_qty(
                                 self.cfg.symbol_spot, self.current_spot_order_id
                             )
-                            new_fill = filled - self.hedged_qty
-                            if new_fill > 1e-12:
-                                logger.info("[NO_LEVEL] 撤单后发现竞态成交: qty=%s", new_fill)
-                                success = self._try_hedge(new_fill)
-                                if success:
-                                    self.hedged_qty = filled
-                                else:
-                                    hedge_ok = False
+                            # 哨兵值 -1 表示订单查不到，跳过
+                            if filled >= 0:
+                                new_fill = filled - self.hedged_qty
+                                if new_fill > 1e-12:
+                                    logger.info("[NO_LEVEL] 撤单后发现竞态成交: qty=%s", new_fill)
+                                    success = self._try_hedge(new_fill)
+                                    if success:
+                                        self.hedged_qty = filled
+                                    else:
+                                        hedge_ok = False
+                            else:
+                                logger.warning("[NO_LEVEL] 撤单后查单返回哨兵值，跳过竞态检查")
                         except Exception:
                             logger.exception("[NO_LEVEL] 撤单后检查成交量失败")
                             hedge_ok = False
@@ -382,29 +394,33 @@ class SpotFuturesArbitrageBot:
                     filled = self.adapter.get_order_filled_qty(
                         self.cfg.symbol_spot, self.current_spot_order_id
                     )
-                    new_fill = filled - self.hedged_qty
-                    if new_fill > 1e-12:
-                        success = self._try_hedge(new_fill)
-                        if success:
-                            if self.trade_logger and self.last_quote_price is not None:
-                                self.trade_logger.log_spot_fill(
-                                    self.cfg.symbol_spot,
-                                    self.current_spot_order_id,
-                                    self.last_quote_price,
-                                    new_fill,
+                    # 哨兵值 -1 表示订单查不到，跳过本轮检查
+                    if filled < 0:
+                        logger.debug("查单返回哨兵值，跳过成交检查")
+                    else:
+                        new_fill = filled - self.hedged_qty
+                        if new_fill > 1e-12:
+                            success = self._try_hedge(new_fill)
+                            if success:
+                                if self.trade_logger and self.last_quote_price is not None:
+                                    self.trade_logger.log_spot_fill(
+                                        self.cfg.symbol_spot,
+                                        self.current_spot_order_id,
+                                        self.last_quote_price,
+                                        new_fill,
+                                    )
+                                self.hedged_qty = filled
+                            # 全部成交 → 重置状态
+                            if success and filled >= self._current_order_qty - 1e-12:
+                                spread_bps = ((fut_bid - target_price) / target_price) * 10000
+                                logger.info(
+                                    "套利完成: 买%d @ %.2f, qty=%.8f, 合约 @ %.2f, spread=%.2fbps",
+                                    level, target_price, self._current_order_qty, fut_bid, spread_bps,
                                 )
-                            self.hedged_qty = filled
-                        # 全部成交 → 重置状态
-                        if success and filled >= self._current_order_qty - 1e-12:
-                            spread_bps = ((fut_bid - target_price) / target_price) * 10000
-                            logger.info(
-                                "套利完成: 买%d @ %.2f, qty=%.8f, 合约 @ %.2f, spread=%.2fbps",
-                                level, target_price, self._current_order_qty, fut_bid, spread_bps,
-                            )
-                            self.current_spot_order_id = None
-                            self.last_quote_price = None
-                            self._current_order_qty = 0.0
-                            self.hedged_qty = 0.0
+                                self.current_spot_order_id = None
+                                self.last_quote_price = None
+                                self._current_order_qty = 0.0
+                                self.hedged_qty = 0.0
 
                 time.sleep(self.cfg.poll_interval_sec)
 
