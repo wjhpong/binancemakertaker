@@ -1,13 +1,13 @@
 fee:
-  spot_maker: -0.00025     # maker 返佣（负值=返佣, BNB 抵扣后约 -0.025%）
-  fut_taker: 0.0004        # 合约 taker 费率 0.04%
-  min_profit_bps: 0.5      # 最小利润要求 (bps)
+  spot_maker: 0.000675      # VIP2 maker 0.09% × BNB 75% = 0.0675%
+  fut_taker: 0.00036        # VIP2 taker 0.04% × BNB 90% = 0.036%
+  min_profit_bps: 0.5       # 最小利润要求 (bps)
 
 strategy:
   symbol_spot: ASTERUSDT
   symbol_fut: ASTERUSDT
   tick_size_spot: 0.001     # 现货最小价格变动
-  total_budget: 10000       # 总买入金额 (USDT)
+  total_budget: 4000        # 总买入金额 (USDT)
   budget_pct: 0.01          # 单笔不超过总金额的 1%
   depth_ratio: 0.3          # 单笔不超过该档深度的 30%
   min_order_qty: 1          # 最小下单量 (ASTER) — 合约最小1
