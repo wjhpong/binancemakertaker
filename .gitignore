@@ -1,0 +1,6 @@
+.env
+trades.db
+*.log
+__pycache__/
+*.pyc
+.claude/
