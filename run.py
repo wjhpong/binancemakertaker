@@ -106,13 +106,13 @@ def main() -> None:
     try:
         bot.run()
     finally:
-        # 清理：撤销未完成的挂单
-        if bot.current_spot_order_id:
+        # 清理：撤销所有残留挂单
+        for oid, order in list(bot._active_orders.items()):
             try:
-                adapter.cancel_order(cfg.symbol_spot, bot.current_spot_order_id)
-                logger.info("已撤销残留挂单: %s", bot.current_spot_order_id)
+                adapter.cancel_order(cfg.symbol_spot, oid)
+                logger.info("已撤销残留挂单: 买%d order_id=%s", order.level_idx, oid)
             except Exception:
-                logger.exception("退出时撤单失败")
+                logger.exception("退出时撤单失败: order_id=%s", oid)
 
         # 警告裸露仓位
         if bot.naked_exposure > 0:
