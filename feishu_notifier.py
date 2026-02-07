@@ -42,6 +42,23 @@ class FeishuNotifier:
         payload = {"msg_type": "text", "content": {"text": text}}
         return self._post(payload)
 
+    def notify_start(self, symbol: str, budget_base: float, testnet: bool) -> None:
+        env = "Testnet" if testnet else "Mainnet"
+        text = (
+            f"[机器人启动] {symbol}\n"
+            f"环境: {env}\n"
+            f"预算: {budget_base:.4f} 币"
+        )
+        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
+
+    def notify_pause(self, symbol: str) -> None:
+        text = f"[机器人暂停] {symbol}\n挂单已暂停，等待恢复指令"
+        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
+
+    def notify_resume(self, symbol: str) -> None:
+        text = f"[机器人恢复] {symbol}\n已恢复挂单"
+        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
+
     def notify_progress(
         self,
         symbol: str,

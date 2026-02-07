@@ -177,12 +177,16 @@ class SpotFuturesArbitrageBot:
         with self._state_lock:
             self._paused = True
         logger.info("[CMD] 暂停挂单")
+        if self.notifier:
+            self.notifier.notify_pause(self.cfg.symbol_spot)
 
     def resume(self) -> None:
         """恢复挂单。"""
         with self._state_lock:
             self._paused = False
         logger.info("[CMD] 恢复挂单")
+        if self.notifier:
+            self.notifier.notify_resume(self.cfg.symbol_spot)
 
     @property
     def is_paused(self) -> bool:
@@ -477,7 +481,7 @@ class SpotFuturesArbitrageBot:
     def run(self) -> None:
         logger.info(
             "启动多档做市套利机器人 | net_cost=%.4f%%, min_spread=%.4f%%, "
-            "budget=%.0fU, 每轮=%.0fU (%.1f%%)",
+            "budget=%.6f 币, 每轮=%.6f 币 (%.1f%%)",
             self.fee.net_cost * 100,
             self.fee.min_spread * 100,
             self.cfg.total_budget,

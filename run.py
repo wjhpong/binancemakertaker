@@ -123,6 +123,8 @@ def main() -> None:
         fill_queue=ws.fill_queue,
     )
     bot.notifier = notifier
+    if notifier:
+        notifier.notify_start(cfg.symbol_spot, cfg.total_budget, testnet)
 
     # ── 信号处理 ──
     def shutdown(signum, _frame):

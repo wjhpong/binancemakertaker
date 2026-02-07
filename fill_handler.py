@@ -173,8 +173,8 @@ class FillHandler:
                 hedged_part = min(unhedged, remaining_hedge)
                 order.hedged_qty += hedged_part
                 remaining_hedge -= hedged_part
-            logger.info("[PROGRESS] 累计成交: %.2fU / %.2fU",
-                        self.total_filled_usdt, self.cfg.total_budget)
+            logger.info("[PROGRESS] 累计成交: %.6f / %.6f 币",
+                        self.total_filled_base, self.cfg.total_budget)
 
         # 清理完全成交的订单（需要 bot 的 _level_to_oid，通过回调通知）
         for oid in fully_filled:
