@@ -301,23 +301,20 @@ class SpotFuturesArbitrageBot:
 
         desired: [(level_idx, price, qty), ...]
         返回 True 表示正常；False 表示有风险敞口，暂停开仓。
+
+        注意：不取消 spread 边缘震荡导致暂时不满足条件的档位。
+        仅在挂单漂移(drift)时通过主循环的 _orders_drifted 统一撤单。
         """
         desired_map = {d[0]: d for d in desired}
         current_levels = set(self._level_to_oid.keys())
         desired_levels = set(desired_map.keys())
 
-        to_cancel = current_levels - desired_levels      # 不再需要的档位
+        # 不再取消"不在desired但仍在活跃"的档位 —— 保留它们
+        # 只有漂移检查 _orders_drifted 才会全撤
         to_add = desired_levels - current_levels          # 新增档位
         to_check = current_levels & desired_levels        # 可能需要改价
 
         total_unhedged = 0.0
-
-        # 1. 取消不再需要的档位
-        for lv in to_cancel:
-            total_unhedged += self._cancel_level_order(lv)
-            oid = self._level_to_oid.pop(lv, None)
-            if oid:
-                self._active_orders.pop(oid, None)
 
         # 2. 检查需要改价的档位
         for lv in to_check:
