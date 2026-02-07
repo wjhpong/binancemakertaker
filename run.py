@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""启动入口 —— 加载配置、初始化组件、交互式命令行、优雅退出。"""
+"""启动入口 —— 加载配置、初始化组件、信号处理、优雅退出。
+远程控制通过 ctl.py + Unix socket 实现。
+"""
 
 from __future__ import annotations
 
@@ -7,7 +9,6 @@ import logging
 import os
 import signal
 import sys
-import threading
 from dataclasses import replace
 
 from arbitrage_bot import SpotFuturesArbitrageBot
@@ -24,94 +25,6 @@ _FEISHU_WEBHOOK = os.environ.get(
     "FEISHU_WEBHOOK",
     "https://open.feishu.cn/open-apis/bot/v2/hook/da41fa3f-a538-40a8-a226-4b9de2e3e083",
 )
-
-
-def _print_help() -> None:
-    print(
-        "\n"
-        "===== 命令行控制 =====\n"
-        "  start       开始挂单\n"
-        "  pause       暂停挂单（撤销全部挂单）\n"
-        "  stop        停止并退出\n"
-        "  budget N    设置总预算为 N USDT（如 budget 8000）\n"
-        "  status      查看当前状态\n"
-        "  help        显示此帮助\n"
-        "========================\n"
-    )
-
-
-def _cmd_loop(bot: SpotFuturesArbitrageBot) -> None:
-    """在独立线程中运行交互式命令行。"""
-    _print_help()
-    while bot._running:
-        try:
-            line = input("> ").strip().lower()
-        except EOFError:
-            break
-        except KeyboardInterrupt:
-            bot.stop()
-            break
-
-        if not line:
-            continue
-
-        parts = line.split()
-        cmd = parts[0]
-
-        if cmd == "start":
-            if bot.is_paused:
-                bot.resume()
-                print("已恢复挂单")
-            else:
-                print("已在运行中")
-
-        elif cmd == "pause":
-            if not bot.is_paused:
-                bot.pause()
-                print("已暂停，全部挂单将撤销")
-            else:
-                print("已经是暂停状态")
-
-        elif cmd == "stop":
-            print("正在停止...")
-            bot.stop()
-            break
-
-        elif cmd == "budget":
-            if len(parts) < 2:
-                print(f"当前预算: {bot.cfg.total_budget:.0f}U，已用: {bot._total_filled_usdt:.2f}U")
-                print("用法: budget 8000")
-            else:
-                try:
-                    new_budget = float(parts[1])
-                    if new_budget <= 0:
-                        print("预算必须 > 0")
-                    else:
-                        bot.set_budget(new_budget)
-                        print(f"总预算已设为 {new_budget:.0f}U")
-                except ValueError:
-                    print("无效数字，用法: budget 8000")
-
-        elif cmd == "status":
-            paused = "暂停" if bot.is_paused else "运行中"
-            remaining = bot._remaining_budget()
-            active = len(bot._active_orders)
-            print(
-                f"状态: {paused}\n"
-                f"预算: {bot._total_filled_usdt:.2f} / {bot.cfg.total_budget:.0f}U "
-                f"(剩余 {remaining:.2f}U)\n"
-                f"活跃挂单: {active}\n"
-                f"裸露仓位: {bot.naked_exposure:.4f}"
-            )
-            for oid, order in bot._active_orders.items():
-                print(f"  买{order.level_idx}: price={order.price}, qty={order.qty:.2f}, "
-                      f"hedged={order.hedged_qty:.2f}, id={oid}")
-
-        elif cmd == "help":
-            _print_help()
-
-        else:
-            print(f"未知命令: {cmd}，输入 help 查看帮助")
 
 
 def main() -> None:
@@ -225,19 +138,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # ── 控制服务器（Unix socket，始终启动） ──
+    # ── 控制服务器（Unix socket，供 ctl.py 远程控制） ──
     ctrl = ControlServer(bot)
     ctrl.start()
-
-    # ── 命令行交互线程（仅 TTY 模式） ──
-    if sys.stdin.isatty():
-        # TTY 模式下默认暂停，等用户输入 start 后开始
-        bot.pause()
-        print("机器人已就绪，输入 start 开始挂单")
-        cmd_thread = threading.Thread(target=_cmd_loop, args=(bot,), daemon=True)
-        cmd_thread.start()
-    else:
-        logger.info("非交互模式（无 TTY），直接开始运行")
 
     # ── 运行 ──
     try:
