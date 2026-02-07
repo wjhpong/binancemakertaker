@@ -91,11 +91,11 @@ class WSManager:
     _SPOT_REST = "https://api.binance.com"
     _SPOT_WS_BASE = "wss://stream.binance.com:9443/ws/"
 
-    # ── 测试网 endpoint ──
-    _SPOT_DEPTH_WS_TESTNET = "wss://testnet.binance.vision/ws/{symbol}@depth5@100ms"
-    _FUT_WS_TESTNET = "wss://stream.binancefuture.com/ws/{symbol}@bookTicker"
-    _SPOT_REST_TESTNET = "https://testnet.binance.vision"
-    _SPOT_WS_BASE_TESTNET = "wss://testnet.binance.vision/ws/"
+    # ── 模拟盘 (Demo Trading) endpoint ──
+    _SPOT_DEPTH_WS_TESTNET = "wss://demo-stream.binance.com/ws/{symbol}@depth5@100ms"
+    _FUT_WS_TESTNET = "wss://fstream.binancefuture.com/ws/{symbol}@bookTicker"
+    _SPOT_REST_TESTNET = "https://demo-api.binance.com"
+    _SPOT_WS_BASE_TESTNET = "wss://demo-stream.binance.com/ws/"
 
     def __init__(
         self,

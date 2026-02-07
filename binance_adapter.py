@@ -73,13 +73,13 @@ class BinanceAdapter(ExchangeAdapter):
         # ── 现货客户端 ──
         spot_kwargs: dict = {"api_key": api_key, "api_secret": api_secret}
         if testnet:
-            spot_kwargs["base_url"] = "https://testnet.binance.vision"
+            spot_kwargs["base_url"] = "https://demo-api.binance.com"
         self.spot = Spot(**spot_kwargs)
 
         # ── 合约客户端 ──
         fut_kwargs: dict = {"key": api_key, "secret": api_secret}
         if testnet:
-            fut_kwargs["base_url"] = "https://testnet.binancefuture.com"
+            fut_kwargs["base_url"] = "https://demo-fapi.binance.com"
         self.futures = UMFutures(**fut_kwargs)
 
         # ── 可选的 WS 价格缓存 ──
