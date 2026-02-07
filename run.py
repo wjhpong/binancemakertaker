@@ -13,6 +13,7 @@ from dataclasses import replace
 from arbitrage_bot import SpotFuturesArbitrageBot
 from binance_adapter import BinanceAdapter
 from config import load_config
+from control_server import ControlServer
 from feishu_notifier import FeishuNotifier
 from trade_logger import TradeLogger
 from ws_manager import WSManager
@@ -224,6 +225,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    # ── 控制服务器（Unix socket，始终启动） ──
+    ctrl = ControlServer(bot)
+    ctrl.start()
+
     # ── 命令行交互线程（仅 TTY 模式） ──
     if sys.stdin.isatty():
         # TTY 模式下默认暂停，等用户输入 start 后开始
@@ -238,6 +243,7 @@ def main() -> None:
     try:
         bot.run()
     finally:
+        ctrl.stop()
         # 清理：撤销所有残留挂单
         for oid, order in list(bot._active_orders.items()):
             try:
