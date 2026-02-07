@@ -99,6 +99,7 @@ class SpotFuturesArbitrageBot:
         self._level_to_oid: dict[int, str] = {}            # level_idx → order_id
 
         self.naked_exposure: float = 0.0
+        self._total_filled_usdt: float = 0.0  # 累计已成交金额(USDT)
         self._running: bool = True
 
     def stop(self) -> None:
@@ -123,7 +124,12 @@ class SpotFuturesArbitrageBot:
             return []
 
         min_spread = self.fee.min_spread
-        cycle_budget = self.cfg.total_budget * self.cfg.budget_pct
+        remaining = self._remaining_budget()
+        if remaining < 1.0:
+            logger.info("[BUDGET] 已买满 %.2fU / %.2fU，停止挂单",
+                        self._total_filled_usdt, self.cfg.total_budget)
+            return []
+        cycle_budget = min(self.cfg.total_budget * self.cfg.budget_pct, remaining)
         lot = self.cfg.lot_size
 
         results: list[tuple[int, float, float]] = []
@@ -156,6 +162,24 @@ class SpotFuturesArbitrageBot:
         return results
 
     # ── 单档操作 ──────────────────────────────────────────────
+
+    def _orders_drifted(self, spot_bids: list[tuple[float, float]]) -> bool:
+        """检查挂单价格是否已漂移到盘口买5以外（价格上涨导致），需要全撤重挂。"""
+        if not self._active_orders or len(spot_bids) < 5:
+            return False
+        bid5_price = spot_bids[4][0]  # 买五价格
+        for order in self._active_orders.values():
+            if order.price < bid5_price:
+                logger.info(
+                    "[DRIFT] 买%d 挂单价 %.4f 已低于盘口买5 %.4f，需全撤重挂",
+                    order.level_idx, order.price, bid5_price,
+                )
+                return True
+        return False
+
+    def _remaining_budget(self) -> float:
+        """剩余可用预算(USDT)。"""
+        return max(0.0, self.cfg.total_budget - self._total_filled_usdt)
 
     def _need_reprice_level(self, level_idx: int, new_price: float, new_qty: float) -> bool:
         """检查指定档位是否需要改单。只在价格变化时触发，深度波动不触发改单。"""
@@ -367,11 +391,16 @@ class SpotFuturesArbitrageBot:
                     if order is None:
                         continue
                     new_fill = cum_filled - order.hedged_qty
-                    if new_fill > 1e-12 and self.trade_logger:
-                        self.trade_logger.log_spot_fill(
-                            self.cfg.symbol_spot, oid, order.price, new_fill,
-                        )
+                    if new_fill > 1e-12:
+                        # 累计成交金额
+                        self._total_filled_usdt += new_fill * order.price
+                        if self.trade_logger:
+                            self.trade_logger.log_spot_fill(
+                                self.cfg.symbol_spot, oid, order.price, new_fill,
+                            )
                     order.hedged_qty = cum_filled
+                logger.info("[PROGRESS] 累计成交: %.2fU / %.2fU",
+                            self._total_filled_usdt, self.cfg.total_budget)
 
         # 清理完全成交的订单
         for oid in fully_filled:
@@ -448,11 +477,13 @@ class SpotFuturesArbitrageBot:
 
     def run(self) -> None:
         logger.info(
-            "启动多档做市套利机器人 | net_cost=%.4f%%, min_spread=%.4f%%, levels=%d~%d",
+            "启动多档做市套利机器人 | net_cost=%.4f%%, min_spread=%.4f%%, "
+            "budget=%.0fU, 每轮=%.0fU (%.1f%%)",
             self.fee.net_cost * 100,
             self.fee.min_spread * 100,
-            self.cfg.min_level,
-            self.cfg.max_level,
+            self.cfg.total_budget,
+            self.cfg.total_budget * self.cfg.budget_pct,
+            self.cfg.budget_pct * 100,
         )
         while self._running:
             try:
@@ -469,6 +500,13 @@ class SpotFuturesArbitrageBot:
                 if not spot_bids:
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
+
+                # 漂移检查：挂单价已低于盘口买5 → 全撤重挂
+                if self._orders_drifted(spot_bids):
+                    unhedged = self._cancel_all_orders()
+                    if unhedged > 1e-12:
+                        self._try_hedge(unhedged)
+                    # 不 continue，下面会重新选档挂单
 
                 # 多档选档
                 desired = self._select_all_levels(spot_bids, fut_bid)
