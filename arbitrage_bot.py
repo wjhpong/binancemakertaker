@@ -101,9 +101,34 @@ class SpotFuturesArbitrageBot:
         self.naked_exposure: float = 0.0
         self._total_filled_usdt: float = 0.0  # 累计已成交金额(USDT)
         self._running: bool = True
+        self._paused: bool = False
+
+        # 飞书通知器（可选）
+        self.notifier = None
 
     def stop(self) -> None:
         self._running = False
+
+    def pause(self) -> None:
+        """暂停挂单（撤销所有挂单，但不退出主循环）。"""
+        self._paused = True
+        logger.info("[CMD] 暂停挂单")
+
+    def resume(self) -> None:
+        """恢复挂单。"""
+        self._paused = False
+        logger.info("[CMD] 恢复挂单")
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def set_budget(self, new_budget: float) -> None:
+        """运行时修改总预算。"""
+        from dataclasses import replace
+        old = self.cfg.total_budget
+        self.cfg = replace(self.cfg, total_budget=new_budget)
+        logger.info("[CMD] 总预算从 %.0fU 改为 %.0fU", old, new_budget)
 
     # ── 多档选档 + 深度加权分配 ───────────────────────────────
 
@@ -128,6 +153,8 @@ class SpotFuturesArbitrageBot:
         if remaining < 1.0:
             logger.info("[BUDGET] 已买满 %.2fU / %.2fU，停止挂单",
                         self._total_filled_usdt, self.cfg.total_budget)
+            if self.notifier:
+                self.notifier.notify_budget_complete(self.cfg.total_budget)
             return []
         cycle_budget = min(self.cfg.total_budget * self.cfg.budget_pct, remaining)
         lot = self.cfg.lot_size
@@ -182,14 +209,19 @@ class SpotFuturesArbitrageBot:
         return max(0.0, self.cfg.total_budget - self._total_filled_usdt)
 
     def _need_reprice_level(self, level_idx: int, new_price: float, new_qty: float) -> bool:
-        """检查指定档位是否需要改单。只在价格变化时触发，深度波动不触发改单。"""
+        """检查指定档位是否需要改单。只在价格变化时触发，深度波动不触发改单。
+
+        阈值 = max(reprice_bps 计算值, 3 × tick_size)，避免小价格币种频繁改单。
+        """
         oid = self._level_to_oid.get(level_idx)
         if oid is None:
             return True
         order = self._active_orders.get(oid)
         if order is None:
             return True
-        threshold = order.price * (self.cfg.reprice_bps / 10000.0)
+        bps_threshold = order.price * (self.cfg.reprice_bps / 10000.0)
+        tick_threshold = self.cfg.tick_size_spot * 3  # 至少变动3个tick才改单
+        threshold = max(bps_threshold, tick_threshold)
         return abs(new_price - order.price) >= threshold
 
     def _cancel_level_order(self, level_idx: int) -> float:
@@ -399,6 +431,17 @@ class SpotFuturesArbitrageBot:
                                 self.cfg.symbol_spot, oid, order.price, new_fill,
                             )
                     order.hedged_qty = cum_filled
+                    # 飞书通知
+                    if self.notifier and new_fill > 1e-12:
+                        self.notifier.notify_fill(
+                            symbol=self.cfg.symbol_spot,
+                            level_idx=order.level_idx,
+                            price=order.price,
+                            qty=new_fill,
+                            filled_usdt=new_fill * order.price,
+                            total_filled_usdt=self._total_filled_usdt,
+                            total_budget=self.cfg.total_budget,
+                        )
                 logger.info("[PROGRESS] 累计成交: %.2fU / %.2fU",
                             self._total_filled_usdt, self.cfg.total_budget)
 
@@ -435,6 +478,10 @@ class SpotFuturesArbitrageBot:
                     self.trade_logger.log_hedge(
                         self.cfg.symbol_fut, hedge_id, hedge_qty, success=True, price=hedge_price
                     )
+                if self.notifier:
+                    self.notifier.notify_hedge(
+                        self.cfg.symbol_fut, hedge_qty, hedge_price, success=True,
+                    )
                 return True
             except Exception as exc:
                 logger.warning("[HEDGE] 重试 %d/%d 失败: %s", i + 1, self.cfg.max_retry, exc)
@@ -445,6 +492,8 @@ class SpotFuturesArbitrageBot:
         self.naked_exposure += hedge_qty
         if self.trade_logger:
             self.trade_logger.log_hedge(self.cfg.symbol_fut, "", hedge_qty, success=False)
+        if self.notifier:
+            self.notifier.notify_hedge(self.cfg.symbol_fut, hedge_qty, None, success=False)
         return False
 
     def _try_recover_naked_exposure(self) -> bool:
@@ -487,6 +536,16 @@ class SpotFuturesArbitrageBot:
         )
         while self._running:
             try:
+                # 暂停状态：撤单后等待
+                if self._paused:
+                    if self._active_orders:
+                        logger.info("[PAUSE] 暂停中，撤销全部挂单")
+                        unhedged = self._cancel_all_orders()
+                        if unhedged > 1e-12:
+                            self._try_hedge(unhedged)
+                    time.sleep(self.cfg.poll_interval_sec)
+                    continue
+
                 # 优先恢复裸露仓位
                 if self.naked_exposure > 0:
                     if not self._try_recover_naked_exposure():
