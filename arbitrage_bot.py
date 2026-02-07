@@ -571,11 +571,12 @@ class SpotFuturesArbitrageBot:
                 desired = self._select_all_levels(spot_bids, fut_bid)
 
                 if not desired:
-                    if self._active_orders:
-                        logger.info("[NO_LEVEL] 无合适档位，撤销全部挂单")
-                        unhedged = self._cancel_all_orders()
-                        if unhedged > 1e-12:
-                            self._try_hedge(unhedged)
+                    # 已有挂单时不立即撤销，仅当挂单漂移到买5外时才撤
+                    # 避免 spread 在边缘震荡导致反复下撤
+                    if not self._active_orders:
+                        time.sleep(self.cfg.poll_interval_sec)
+                        continue
+                    # 有挂单但无合适档位 → 保持现有挂单，等待下次循环
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
