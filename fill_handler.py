@@ -251,6 +251,14 @@ class FillHandler:
                     return False, hedge_qty
                 return True, hedge_qty
             except Exception as exc:
+                if self._is_notional_too_small(exc):
+                    logger.warning(
+                        "[HEDGE] 对冲量 %s 名义价值不足合约最小下单额(5 USDT)，"
+                        "转入裸露仓位等待累计",
+                        hedge_qty,
+                    )
+                    self.naked_exposure = total_to_hedge
+                    return False, 0.0
                 logger.warning("[HEDGE] 重试 %d/%d 失败: %s", i + 1, self.cfg.max_retry, exc)
                 if i + 1 < self.cfg.max_retry:
                     time.sleep(0.15)
@@ -262,6 +270,14 @@ class FillHandler:
         return False, 0.0
 
     # ── 裸露仓位恢复 ─────────────────────────────────────────
+
+    @staticmethod
+    def _is_notional_too_small(exc: Exception) -> bool:
+        """检查异常是否为合约最小名义价值不足（错误码 -4164）。"""
+        args = getattr(exc, "args", ())
+        if args and len(args) >= 2 and args[1] == -4164:
+            return True
+        return "-4164" in str(exc)
 
     def try_recover_naked_exposure(self) -> bool:
         """尝试对冲裸露仓位，返回是否恢复成功。"""
@@ -306,6 +322,14 @@ class FillHandler:
                     )
                 return True
             except Exception as exc:
+                if self._is_notional_too_small(exc):
+                    logger.warning(
+                        "[RECOVER] 裸露仓位 %.4f 名义价值不足合约最小下单额(5 USDT)，"
+                        "放弃对冲并清零（损失可忽略）",
+                        self.naked_exposure,
+                    )
+                    self.naked_exposure = 0.0
+                    return True
                 logger.warning("[RECOVER] 重试 %d/%d 失败: %s", i + 1, self.cfg.max_retry, exc)
                 if i + 1 < self.cfg.max_retry:
                     time.sleep(0.15)
