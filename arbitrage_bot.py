@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class FeeConfig:
     spot_maker: float = 0.000675    # VIP2 maker 0.0675%
     fut_taker: float = 0.00036     # VIP2 taker 0.036%
-    min_spread_bps: float = 10.35  # 最小spread门槛 (bps)
+    min_spread_bps: float = -18.0  # 最小spread门槛 (bps)，可为负
 
     @property
     def min_spread(self) -> float:

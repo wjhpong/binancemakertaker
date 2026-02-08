@@ -1,7 +1,7 @@
 fee:
   spot_maker: 0.000675      # VIP2 maker 0.09% × BNB 75% = 0.0675%
   fut_taker: 0.00036        # VIP2 taker 0.04% × BNB 90% = 0.036%
-  min_spread_bps: 10.35     # 最小spread门槛 (bps)
+  min_spread_bps: -18       # 最小spread门槛 (bps)，可为负
 
 strategy:
   symbol_spot: ASTERUSDT
