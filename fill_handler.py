@@ -94,7 +94,10 @@ class FillHandler:
     # ── 撤单时的成交检测 ─────────────────────────────────────
 
     def detect_fills_on_cancel(self, oid: str, order: LevelOrder) -> float:
-        """撤单前/后检测该订单的成交量，返回未对冲成交量。"""
+        """撤单前/后检测该订单的成交量，返回未对冲成交量。
+
+        注意：会同步更新 order.hedged_qty，避免被多次调用时重复计算。
+        """
         unhedged = 0.0
         ws_fills = self.drain_fill_queue()
         if oid in ws_fills:
@@ -102,6 +105,7 @@ class FillHandler:
             new_fill = ws_fills[oid] - order.hedged_qty
             if new_fill > 1e-12:
                 unhedged += new_fill
+                order.hedged_qty += new_fill
         else:
             filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
             if filled >= 0:
@@ -109,6 +113,7 @@ class FillHandler:
                 new_fill = filled - order.hedged_qty
                 if new_fill > 1e-12:
                     unhedged += new_fill
+                    order.hedged_qty += new_fill
         return unhedged
 
     # ── 批量成交检测 + 对冲 ──────────────────────────────────
