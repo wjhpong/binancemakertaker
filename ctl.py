@@ -10,6 +10,7 @@
     python ctl.py budget 8000
     python ctl.py spread
     python ctl.py spread 1.5
+    python ctl.py spread auto
 
 交互模式:
     python ctl.py
@@ -60,6 +61,8 @@ def print_resp(resp: dict) -> None:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
         print(f"现货累计成交: {resp.get('spot_filled_base', 0.0):.6f} 币")
         print(f"合约累计对冲: {resp.get('perp_hedged_base', 0.0):.6f} 币")
+        mode = resp.get("spread_mode", "auto")
+        print(f"Spread模式: {mode}")
         print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
         print(f"当前最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
         spot_avg = resp.get("spot_avg_price")
@@ -98,6 +101,8 @@ def print_resp(resp: dict) -> None:
     elif "budget" in resp and "paused" not in resp:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
     elif "min_spread_bps" in resp:
+        mode = resp.get("spread_mode", "auto")
+        print(f"Spread模式: {mode}")
         print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
         print(f"当前最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
 
@@ -186,7 +191,7 @@ def interactive() -> None:
         # 修改 spread(bps)
         if choice == 8:
             try:
-                bps = input("请输入新的最小利润门槛（bps）: ").strip()
+                bps = input("请输入最小spread(bps)，或输入 auto 切回自动模式: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break

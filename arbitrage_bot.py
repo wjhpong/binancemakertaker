@@ -123,6 +123,7 @@ class SpotFuturesArbitrageBot:
         self._close_task_running: bool = False
         self._close_task_status: dict = {"running": False}
         self._close_pending_hedge: float = 0.0
+        self._manual_min_spread_bps: float | None = None
 
         # 飞书通知器（可选）
         self._notifier = None
@@ -226,6 +227,22 @@ class SpotFuturesArbitrageBot:
             self.fee = replace(self.fee, min_profit_bps=new_bps)
         logger.info("[CMD] 最小利润门槛从 %.4f bps 改为 %.4f bps", old, new_bps)
 
+    def set_manual_min_spread_bps(self, bps: float) -> None:
+        with self._state_lock:
+            self._manual_min_spread_bps = bps
+        logger.info("[CMD] 最小spread改为手动 %.4f bps", bps)
+
+    def clear_manual_min_spread_bps(self) -> None:
+        with self._state_lock:
+            self._manual_min_spread_bps = None
+        logger.info("[CMD] 最小spread改为自动模式（费率+利润）")
+
+    @property
+    def min_spread(self) -> float:
+        if self._manual_min_spread_bps is not None:
+            return self._manual_min_spread_bps / 10000.0
+        return self.fee.min_spread
+
     @property
     def total_filled_usdt(self) -> float:
         return self._total_filled_usdt
@@ -310,7 +327,8 @@ class SpotFuturesArbitrageBot:
                 ),
                 "perp_avg_priced_base": round(self.fh.total_hedged_base_priced, 6),
                 "min_profit_bps": round(self.fee.min_profit_bps, 4),
-                "min_spread_bps": round(self.fee.min_spread * 10000.0, 4),
+                "min_spread_bps": round(self.min_spread * 10000.0, 4),
+                "spread_mode": "manual" if self._manual_min_spread_bps is not None else "auto",
                 "naked_exposure": round(self.naked_exposure, 4),
                 "close_task": dict(self._close_task_status),
                 "close_pending_hedge": round(self._close_pending_hedge, 6),
@@ -526,7 +544,7 @@ class SpotFuturesArbitrageBot:
             logger.warning("期货 bid 无效: %s", fut_bid)
             return []
 
-        min_spread = self.fee.min_spread
+        min_spread = self.min_spread
         remaining = self._remaining_budget()
         if remaining <= 0:
             logger.info("[BUDGET] 已买满 %.6f 币 / %.6f 币，停止挂单",
@@ -596,10 +614,10 @@ class SpotFuturesArbitrageBot:
             return False
         for order in self._active_orders.values():
             spread = (fut_bid - order.price) / order.price
-            if spread < self.fee.min_spread:
+            if spread < self.min_spread:
                 logger.info(
                     "[GUARD] 买%d 挂单 spread=%.4fbps 低于门槛 %.4fbps，触发撤单",
-                    order.level_idx, spread * 10000, self.fee.min_spread * 10000,
+                    order.level_idx, spread * 10000, self.min_spread * 10000,
                 )
                 return True
         return False

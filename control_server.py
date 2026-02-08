@@ -141,18 +141,31 @@ class ControlServer:
                     "ok": True,
                     "min_profit_bps": snap.get("min_profit_bps"),
                     "min_spread_bps": snap.get("min_spread_bps"),
+                    "spread_mode": snap.get("spread_mode"),
+                }
+            arg0 = str(args[0]).lower()
+            if arg0 == "auto":
+                bot.clear_manual_min_spread_bps()
+                snap = bot.get_status_snapshot()
+                return {
+                    "ok": True,
+                    "msg": "最小spread已切换为自动模式",
+                    "min_profit_bps": snap.get("min_profit_bps"),
+                    "min_spread_bps": snap.get("min_spread_bps"),
+                    "spread_mode": snap.get("spread_mode"),
                 }
             try:
                 bps = float(args[0])
                 if bps < 0:
                     return {"ok": False, "msg": "spread(bps) 必须 >= 0"}
-                bot.set_min_profit_bps(bps)
+                bot.set_manual_min_spread_bps(bps)
                 snap = bot.get_status_snapshot()
                 return {
                     "ok": True,
-                    "msg": f"最小利润门槛已设为 {bps:.4f} bps",
+                    "msg": f"最小spread已设为手动 {bps:.4f} bps",
                     "min_profit_bps": snap.get("min_profit_bps"),
                     "min_spread_bps": snap.get("min_spread_bps"),
+                    "spread_mode": snap.get("spread_mode"),
                 }
             except ValueError:
                 return {"ok": False, "msg": "无效数字"}
