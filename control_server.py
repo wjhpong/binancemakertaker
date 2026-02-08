@@ -156,8 +156,6 @@ class ControlServer:
                 }
             try:
                 bps = float(args[0])
-                if bps < 0:
-                    return {"ok": False, "msg": "spread(bps) 必须 >= 0"}
                 bot.set_manual_min_spread_bps(bps)
                 snap = bot.get_status_snapshot()
                 return {
