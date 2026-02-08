@@ -538,9 +538,17 @@ class SpotFuturesArbitrageBot:
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
-                # 优先恢复裸露仓位
+                # 先处理成交对账，避免状态与交易所脱节
+                self._check_fills_and_hedge()
+
+                # 优先恢复裸露仓位；若无法恢复则进入保护模式（不新开仓）
                 if self.naked_exposure > 0:
                     if not self._try_recover_naked_exposure():
+                        if self._active_orders:
+                            logger.warning("[RISK] 裸露仓位未恢复，撤销全部挂单并暂停新开仓")
+                            unhedged = self._cancel_all_orders()
+                            if unhedged > 1e-12:
+                                self._try_hedge(unhedged)
                         time.sleep(self.cfg.poll_interval_sec)
                         continue
 
@@ -586,7 +594,7 @@ class SpotFuturesArbitrageBot:
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
-                # 检查成交 + 批量对冲
+                # 再做一次成交对账（覆盖本轮下单后的成交事件）
                 self._check_fills_and_hedge()
 
                 # 若买二已完全成交，则撤掉其余档位并在下一轮重挂买二/买三
