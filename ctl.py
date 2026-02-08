@@ -72,7 +72,7 @@ def print_resp(resp: dict) -> None:
         priced_base = resp.get("perp_avg_priced_base", 0.0)
         if priced_base > 0:
             print(f"永续均价覆盖量: {priced_base:.6f} 币")
-        print(f"裸露仓位: {resp['naked_exposure']}")
+        print(f"裸露仓位: {resp['naked_exposure']:.4f}")
         close_task = resp.get("close_task") or {}
         if close_task:
             close_state = "执行中" if close_task.get("running") else "空闲"
@@ -83,6 +83,14 @@ def print_resp(resp: dict) -> None:
                     f"{close_task.get('target_qty', 0.0):.6f} 币, "
                     f"永续已买 {close_task.get('perp_bought', 0.0):.6f} 币"
                 )
+            close_orders = close_task.get("open_orders") or []
+            if close_orders:
+                print(f"平仓活跃卖单 ({len(close_orders)}):")
+                for o in close_orders:
+                    print(
+                        f"  卖单: price={o.get('price')}, qty={o.get('qty', 0.0):.2f}, "
+                        f"filled={o.get('filled', 0.0):.2f}, id={o.get('id')}"
+                    )
         print(f"平仓待对冲累计: {resp.get('close_pending_hedge', 0.0):.6f} 币")
         orders = resp.get("active_orders", [])
         if orders:
@@ -175,7 +183,9 @@ def interactive() -> None:
         # 执行平仓 —— 需要输入币种与数量
         if choice == 7:
             try:
-                symbol = input("请输入币种（例如 ASTERUSDT，回车默认当前币种）: ").strip().upper()
+                symbol = input("请输入币种（例如 ASTER，回车默认当前币种）: ").strip().upper()
+                if symbol and not symbol.endswith("USDT"):
+                    symbol += "USDT"
                 qty = input("请输入平仓数量（币）: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -184,7 +194,10 @@ def interactive() -> None:
                 continue
             args = [qty] if not symbol else [symbol, qty]
             resp = send_cmd("close", args)
-            print_resp(resp)
+            if not resp.get("ok"):
+                print(f"⚠ 平仓失败: {resp.get('msg', '未知错误')}")
+            else:
+                print_resp(resp)
             _print_menu()
             continue
 

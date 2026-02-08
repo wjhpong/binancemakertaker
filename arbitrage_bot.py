@@ -359,6 +359,7 @@ class SpotFuturesArbitrageBot:
                 "target_qty": round(qty, 6),
                 "spot_sold": 0.0,
                 "perp_bought": 0.0,
+                "open_orders": [],
                 "msg": "平仓任务启动",
             }
 
@@ -379,7 +380,18 @@ class SpotFuturesArbitrageBot:
         max_rounds = 200
         max_wait_sec = 8.0
 
-        def _update(msg: str) -> None:
+        def _format_close_orders(open_orders: dict[str, dict]) -> list[dict]:
+            return [
+                {
+                    "id": oid,
+                    "price": info["price"],
+                    "qty": info["qty"],
+                    "filled": info["filled"],
+                }
+                for oid, info in open_orders.items()
+            ]
+
+        def _update(msg: str, open_orders: dict[str, dict] | None = None) -> None:
             with self._close_task_lock:
                 self._close_task_status.update(
                     {
@@ -387,6 +399,7 @@ class SpotFuturesArbitrageBot:
                         "spot_sold": round(sold, 6),
                         "perp_bought": round(perp_bought, 6),
                         "pending_hedge": round(pending_hedge, 6),
+                        "open_orders": _format_close_orders(open_orders or {}),
                         "msg": msg,
                     }
                 )
@@ -394,7 +407,7 @@ class SpotFuturesArbitrageBot:
         try:
             self.pause()
             time.sleep(self.cfg.poll_interval_sec * 2)
-            _update("已暂停开仓，开始执行平仓")
+            _update("已暂停开仓，开始执行平仓", {})
 
             for _ in range(max_rounds):
                 remaining = max(0.0, target_qty - sold)
@@ -404,7 +417,7 @@ class SpotFuturesArbitrageBot:
                 asks = self.adapter.get_spot_asks(symbol, levels=5)
                 fut_ask = self.adapter.get_futures_best_ask(self.cfg.symbol_fut)
                 if len(asks) < 3 or fut_ask <= 0:
-                    _update("盘口不足，等待下一轮")
+                    _update("盘口不足，等待下一轮", {})
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
@@ -412,8 +425,8 @@ class SpotFuturesArbitrageBot:
                 price3 = asks[2][0]
                 spread2 = (price2 - fut_ask) / price2 if price2 > 0 else -1
                 spread3 = (price3 - fut_ask) / price3 if price3 > 0 else -1
-                if spread2 < self.fee.min_spread or spread3 < self.fee.min_spread:
-                    _update("平仓价差未达门槛，等待")
+                if spread2 < self.min_spread or spread3 < self.min_spread:
+                    _update("平仓价差未达门槛，等待", {})
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
@@ -433,7 +446,7 @@ class SpotFuturesArbitrageBot:
                 if qty3 >= self.cfg.min_order_qty:
                     oid3 = self.adapter.place_spot_limit_sell(symbol, price3, qty3)
                     open_orders[oid3] = {"price": price3, "qty": qty3, "filled": 0.0}
-                _update(f"已挂平仓卖单 {len(open_orders)} 笔")
+                _update(f"已挂平仓卖单 {len(open_orders)} 笔", open_orders)
 
                 started = time.time()
                 while open_orders and (time.time() - started) < max_wait_sec:
@@ -450,7 +463,7 @@ class SpotFuturesArbitrageBot:
                             info["filled"] = filled
                             sold += new_fill
                             pending_hedge += new_fill
-                            _update("检测到平仓成交，执行永续买入对冲")
+                            _update("检测到平仓成交，执行永续买入对冲", open_orders)
                             hedge_qty = self._floor_to_lot(pending_hedge)
                             if hedge_qty >= self.cfg.lot_size:
                                 try:
@@ -466,7 +479,7 @@ class SpotFuturesArbitrageBot:
                             drift = True
 
                     if drift:
-                        _update("卖单已掉出卖五，撤单重挂")
+                        _update("卖单已掉出卖五，撤单重挂", open_orders)
                         break
                     time.sleep(0.25)
 
@@ -494,12 +507,16 @@ class SpotFuturesArbitrageBot:
                     except Exception:
                         logger.exception("[CLOSE] 轮末永续买入对冲失败，保留 pending_hedge=%.6f", pending_hedge)
 
-                _update("本轮平仓完成，检查剩余数量")
+                _update("本轮平仓完成，检查剩余数量", {})
                 time.sleep(self.cfg.poll_interval_sec)
 
             msg = "平仓完成" if (target_qty - sold) <= self.cfg.min_order_qty else "平仓结束（未完全成交）"
             with self._close_task_lock:
                 self._close_pending_hedge = max(0.0, pending_hedge)
+                # 将未对冲量转入 naked_exposure，由主循环恢复机制接管
+                if pending_hedge > 1e-12:
+                    self.fh.naked_exposure += pending_hedge
+                    logger.warning("[CLOSE] 平仓结束，pending_hedge=%.6f 转入 naked_exposure", pending_hedge)
                 self._close_task_status = {
                     "running": False,
                     "symbol": symbol,
@@ -507,6 +524,7 @@ class SpotFuturesArbitrageBot:
                     "spot_sold": round(sold, 6),
                     "perp_bought": round(perp_bought, 6),
                     "pending_hedge": round(pending_hedge, 6),
+                    "open_orders": [],
                     "msg": msg,
                 }
                 self._close_task_running = False
@@ -514,6 +532,10 @@ class SpotFuturesArbitrageBot:
             logger.exception("[CLOSE] 平仓任务失败")
             with self._close_task_lock:
                 self._close_pending_hedge = max(0.0, pending_hedge)
+                # 将未对冲量转入 naked_exposure，由主循环恢复机制接管
+                if pending_hedge > 1e-12:
+                    self.fh.naked_exposure += pending_hedge
+                    logger.warning("[CLOSE] 平仓异常结束，pending_hedge=%.6f 转入 naked_exposure", pending_hedge)
                 self._close_task_status = {
                     "running": False,
                     "symbol": symbol,
@@ -521,6 +543,7 @@ class SpotFuturesArbitrageBot:
                     "spot_sold": round(sold, 6),
                     "perp_bought": round(perp_bought, 6),
                     "pending_hedge": round(pending_hedge, 6),
+                    "open_orders": [],
                     "msg": f"失败: {exc}",
                 }
                 self._close_task_running = False
