@@ -46,6 +46,7 @@ class FillHandler:
         self.total_hedged_base_priced: float = 0.0
         self.total_hedged_quote: float = 0.0
         self._last_rest_reconcile_ts: float = 0.0
+        self._last_gap_check_ts: float = 0.0
 
     # ── WS 成交事件消费 ──────────────────────────────────────
 
@@ -194,6 +195,26 @@ class FillHandler:
                 )
                 if self._on_order_fully_filled:
                     self._on_order_fully_filled(oid, order)
+
+        # ── 定期差额对账：确保 filled - hedged 不会无限漂移 ──
+        now2 = time.time()
+        if now2 - self._last_gap_check_ts >= 30.0:
+            self._last_gap_check_ts = now2
+            gap = self.total_filled_base - self.total_hedged_base - self.naked_exposure
+            if gap >= self.cfg.lot_size:
+                logger.warning(
+                    "[GAP] 发现对冲缺口: filled=%.4f, hedged=%.4f, naked=%.4f, gap=%.4f → 补充对冲",
+                    self.total_filled_base, self.total_hedged_base,
+                    self.naked_exposure, gap,
+                )
+                self.naked_exposure += gap
+                self.try_hedge(0)  # qty=0，靠 naked_exposure 驱动对冲
+            elif gap < -self.cfg.lot_size:
+                logger.warning(
+                    "[GAP] 发现超额对冲: filled=%.4f, hedged=%.4f, naked=%.4f, gap=%.4f（已多对冲，记录告警）",
+                    self.total_filled_base, self.total_hedged_base,
+                    self.naked_exposure, gap,
+                )
 
     _on_order_fully_filled = None  # 回调：bot 设置，用于清理 _level_to_oid
 
