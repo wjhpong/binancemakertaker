@@ -214,6 +214,14 @@ class SpotFuturesArbitrageBot:
     def total_hedged_base(self) -> float:
         return self.fh.total_hedged_base
 
+    @property
+    def spot_avg_price(self) -> float | None:
+        return self.fh.spot_avg_price
+
+    @property
+    def perp_avg_price(self) -> float | None:
+        return self.fh.perp_avg_price
+
     def get_level_weights(self) -> dict[int, float]:
         return dict(self._LEVEL_WEIGHTS)
 
@@ -268,6 +276,14 @@ class SpotFuturesArbitrageBot:
                 "used_base": round(self._total_filled_base, 6),
                 "spot_filled_base": round(self._total_filled_base, 6),
                 "perp_hedged_base": round(self.total_hedged_base, 6),
+                "spot_avg_price": (
+                    round(self.spot_avg_price, 6)
+                    if self.spot_avg_price is not None else None
+                ),
+                "perp_avg_price": (
+                    round(self.perp_avg_price, 6)
+                    if self.perp_avg_price is not None else None
+                ),
                 "naked_exposure": round(self.naked_exposure, 4),
                 "active_orders": self.get_active_orders_snapshot(),
             }

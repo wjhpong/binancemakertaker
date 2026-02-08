@@ -43,6 +43,7 @@ class FillHandler:
         self.total_filled_usdt: float = 0.0
         self.total_filled_base: float = 0.0
         self.total_hedged_base: float = 0.0
+        self.total_hedged_quote: float = 0.0
         self._last_rest_reconcile_ts: float = 0.0
 
     # ── WS 成交事件消费 ──────────────────────────────────────
@@ -189,6 +190,18 @@ class FillHandler:
 
     _on_order_fully_filled = None  # 回调：bot 设置，用于清理 _level_to_oid
 
+    @property
+    def spot_avg_price(self) -> float | None:
+        if self.total_filled_base <= 1e-12:
+            return None
+        return self.total_filled_usdt / self.total_filled_base
+
+    @property
+    def perp_avg_price(self) -> float | None:
+        if self.total_hedged_base <= 1e-12 or self.total_hedged_quote <= 1e-12:
+            return None
+        return self.total_hedged_quote / self.total_hedged_base
+
     # ── 对冲执行 ─────────────────────────────────────────────
 
     def try_hedge(self, qty: float) -> tuple[bool, float]:
@@ -223,6 +236,8 @@ class FillHandler:
                         total_perp_hedged_base=self.total_hedged_base + hedge_qty,
                     )
                 self.total_hedged_base += hedge_qty
+                if hedge_price and hedge_price > 0:
+                    self.total_hedged_quote += hedge_qty * hedge_price
                 if residual > 1e-12:
                     self.naked_exposure += residual
                     logger.warning(
@@ -269,6 +284,8 @@ class FillHandler:
                         success=True, price=hedge_price,
                     )
                 self.total_hedged_base += hedge_qty
+                if hedge_price and hedge_price > 0:
+                    self.total_hedged_quote += hedge_qty * hedge_price
                 self.naked_exposure = max(0.0, self.naked_exposure - hedge_qty)
                 if self.notifier:
                     self.notifier.notify_progress(

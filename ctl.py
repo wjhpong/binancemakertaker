@@ -58,6 +58,10 @@ def print_resp(resp: dict) -> None:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
         print(f"现货累计成交: {resp.get('spot_filled_base', 0.0):.6f} 币")
         print(f"合约累计对冲: {resp.get('perp_hedged_base', 0.0):.6f} 币")
+        spot_avg = resp.get("spot_avg_price")
+        perp_avg = resp.get("perp_avg_price")
+        print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
+        print(f"永续卖出均价: {perp_avg:.6f}" if perp_avg is not None else "永续卖出均价: -")
         print(f"裸露仓位: {resp['naked_exposure']}")
         orders = resp.get("active_orders", [])
         if orders:
