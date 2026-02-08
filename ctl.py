@@ -32,10 +32,13 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
     # 用 socat 连接 Unix socket
     remote_cmd = f'echo {repr(payload)} | socat - UNIX-CONNECT:{SOCK_PATH}'
     for attempt in (1, 2):
-        result = subprocess.run(
-            ["ssh", SSH_HOST, remote_cmd],
-            capture_output=True, text=True, timeout=10,
-        )
+        try:
+            result = subprocess.run(
+                ["ssh", SSH_HOST, remote_cmd],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "msg": "SSH 连接超时，请检查网络或 EC2 状态"}
         if result.returncode == 0:
             break
         err = result.stderr.strip()
@@ -43,10 +46,13 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
         if cmd == "start" and attempt == 1 and no_service:
             # 兜底：服务已停时，先拉起 systemd 服务再重试一次 socket
             print("机器人未运行，正在启动服务...")
-            subprocess.run(
-                ["ssh", SSH_HOST, "sudo systemctl start arb-bot"],
-                capture_output=True, text=True, timeout=15,
-            )
+            try:
+                subprocess.run(
+                    ["ssh", SSH_HOST, "sudo systemctl start arb-bot"],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "msg": "启动服务超时，请检查 EC2 状态"}
             import time
             time.sleep(3)  # 等待 bot 初始化完成、socket 就绪
             continue
