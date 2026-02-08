@@ -21,15 +21,11 @@ logger = logging.getLogger(__name__)
 class FeeConfig:
     spot_maker: float = 0.000675    # VIP2 maker 0.0675%
     fut_taker: float = 0.00036     # VIP2 taker 0.036%
-    min_profit_bps: float = 0.5    # 最小利润要求 (bps)
-
-    @property
-    def net_cost(self) -> float:
-        return self.fut_taker + self.spot_maker
+    min_spread_bps: float = 10.35  # 最小spread门槛 (bps)
 
     @property
     def min_spread(self) -> float:
-        return self.net_cost + self.min_profit_bps / 10000.0
+        return self.min_spread_bps / 10000.0
 
 
 @dataclass(frozen=True)
@@ -123,8 +119,6 @@ class SpotFuturesArbitrageBot:
         self._close_task_running: bool = False
         self._close_task_status: dict = {"running": False}
         self._close_pending_hedge: float = 0.0
-        self._manual_min_spread_bps: float | None = None
-
         # 飞书通知器（可选）
         self._notifier = None
 
@@ -219,28 +213,16 @@ class SpotFuturesArbitrageBot:
             self.fh.cfg = self.cfg
         logger.info("[CMD] 总预算从 %.4f 币 改为 %.4f 币", old, new_budget)
 
-    def set_min_profit_bps(self, new_bps: float) -> None:
-        """运行时修改最小利润门槛（bps）。"""
+    def set_min_spread_bps(self, new_bps: float) -> None:
+        """运行时修改最小spread门槛（bps）。"""
         from dataclasses import replace
         with self._state_lock:
-            old = self.fee.min_profit_bps
-            self.fee = replace(self.fee, min_profit_bps=new_bps)
-        logger.info("[CMD] 最小利润门槛从 %.4f bps 改为 %.4f bps", old, new_bps)
-
-    def set_manual_min_spread_bps(self, bps: float) -> None:
-        with self._state_lock:
-            self._manual_min_spread_bps = bps
-        logger.info("[CMD] 最小spread改为手动 %.4f bps", bps)
-
-    def clear_manual_min_spread_bps(self) -> None:
-        with self._state_lock:
-            self._manual_min_spread_bps = None
-        logger.info("[CMD] 最小spread改为自动模式（费率+利润）")
+            old = self.fee.min_spread_bps
+            self.fee = replace(self.fee, min_spread_bps=new_bps)
+        logger.info("[CMD] 最小spread从 %.4f bps 改为 %.4f bps", old, new_bps)
 
     @property
     def min_spread(self) -> float:
-        if self._manual_min_spread_bps is not None:
-            return self._manual_min_spread_bps / 10000.0
         return self.fee.min_spread
 
     @property
@@ -326,9 +308,7 @@ class SpotFuturesArbitrageBot:
                     if self.perp_avg_price is not None else None
                 ),
                 "perp_avg_priced_base": round(self.fh.total_hedged_base_priced, 6),
-                "min_profit_bps": round(self.fee.min_profit_bps, 4),
-                "min_spread_bps": round(self.min_spread * 10000.0, 4),
-                "spread_mode": "manual" if self._manual_min_spread_bps is not None else "auto",
+                "min_spread_bps": round(self.fee.min_spread_bps, 4),
                 "naked_exposure": round(self.naked_exposure, 4),
                 "close_task": dict(self._close_task_status),
                 "close_pending_hedge": round(self._close_pending_hedge, 6),
@@ -408,12 +388,14 @@ class SpotFuturesArbitrageBot:
             self.pause()
             time.sleep(self.cfg.poll_interval_sec * 2)
             # 主动撤掉所有开仓买单，不依赖主循环
+            # 注意：先在锁内拿到需要撤的订单，锁外执行 REST 避免阻塞主循环
             with self._state_lock:
-                if self._active_orders:
-                    logger.info("[CLOSE] 主动撤销 %d 笔开仓买单", len(self._active_orders))
-                    unhedged = self._cancel_all_orders()
-                    if unhedged > 1e-12:
-                        self.fh.try_hedge(unhedged)
+                has_orders = bool(self._active_orders)
+            if has_orders:
+                logger.info("[CLOSE] 主动撤销开仓买单")
+                unhedged = self._cancel_all_orders()
+                if unhedged > 1e-12:
+                    self.fh.try_hedge(unhedged)
             _update("已暂停开仓并撤销买单，开始执行平仓", {})
 
             for _ in range(max_rounds):
@@ -428,6 +410,7 @@ class SpotFuturesArbitrageBot:
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
+                # 平仓只挂卖二/卖三（避免挂卖一被立即吃掉导致滑点）
                 price2 = asks[1][0]
                 price3 = asks[2][0]
                 spread2 = (price2 - fut_ask) / price2 if price2 > 0 else -1
@@ -801,10 +784,9 @@ class SpotFuturesArbitrageBot:
 
     def run(self) -> None:
         logger.info(
-            "启动多档做市套利机器人 | net_cost=%.4f%%, min_spread=%.4f%%, "
+            "启动多档做市套利机器人 | min_spread=%.4fbps, "
             "budget=%.6f 币, 每轮=%.6f 币 (%.1f%%)",
-            self.fee.net_cost * 100,
-            self.fee.min_spread * 100,
+            self.fee.min_spread_bps,
             self.cfg.total_budget,
             self.cfg.total_budget * self.cfg.budget_pct,
             self.cfg.budget_pct * 100,

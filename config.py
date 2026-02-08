@@ -58,7 +58,7 @@ def load_config(
     fee = FeeConfig(
         spot_maker=float(fee_raw.get("spot_maker", fee_defaults.spot_maker)),
         fut_taker=float(fee_raw.get("fut_taker", fee_defaults.fut_taker)),
-        min_profit_bps=float(fee_raw.get("min_profit_bps", fee_defaults.min_profit_bps)),
+        min_spread_bps=float(fee_raw.get("min_spread_bps", fee_defaults.min_spread_bps)),
     )
 
     # 策略

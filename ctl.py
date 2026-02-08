@@ -11,7 +11,6 @@
     python ctl.py budget 8000
     python ctl.py spread
     python ctl.py spread 1.5
-    python ctl.py spread auto
 
 交互模式:
     python ctl.py
@@ -43,13 +42,23 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
         no_service = "No such file" in err or "Connection refused" in err
         if cmd == "start" and attempt == 1 and no_service:
             # 兜底：服务已停时，先拉起 systemd 服务再重试一次 socket
+            print("机器人未运行，正在启动服务...")
             subprocess.run(
                 ["ssh", SSH_HOST, "sudo systemctl start arb-bot"],
                 capture_output=True, text=True, timeout=15,
             )
+            import time
+            time.sleep(3)  # 等待 bot 初始化完成、socket 就绪
             continue
         if no_service:
             return {"ok": False, "msg": "机器人未运行或控制服务未启动"}
+        return {"ok": False, "msg": f"SSH 错误: {err}"}
+    else:
+        # 两次都失败
+        return {"ok": False, "msg": "服务启动后仍无法连接，请检查 EC2 上的日志"}
+
+    if result.returncode != 0:
+        err = result.stderr.strip()
         return {"ok": False, "msg": f"SSH 错误: {err}"}
 
     out = result.stdout.strip()
@@ -124,10 +133,7 @@ def print_resp(resp: dict) -> None:
                 print("活跃买单: 无")
 
         # 通用信息
-        mode = resp.get("spread_mode", "auto")
-        print(f"Spread模式: {mode}")
-        print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
-        print(f"当前最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
+        print(f"最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
         spot_avg = resp.get("spot_avg_price")
         perp_avg = resp.get("perp_avg_price")
         print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
@@ -146,10 +152,7 @@ def print_resp(resp: dict) -> None:
     elif "budget" in resp and "paused" not in resp:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
     elif "min_spread_bps" in resp:
-        mode = resp.get("spread_mode", "auto")
-        print(f"Spread模式: {mode}")
-        print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
-        print(f"当前最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
+        print(f"最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
 
 
 _MENU = [
@@ -214,17 +217,12 @@ def interactive() -> None:
 
             if d == "a":
                 try:
-                    qty = input("请输入本次开仓总币数量（直接回车=不修改）: ").strip()
+                    qty = input("请输入本次开仓预算（币数量，直接回车=不修改）: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
-                if qty:
-                    budget_resp = send_cmd("budget", [qty])
-                    print_resp(budget_resp)
-                    if not budget_resp.get("ok"):
-                        _print_menu()
-                        continue
-                resp = send_cmd("start")
+                start_args = [qty] if qty else []
+                resp = send_cmd("start", start_args)
                 print_resp(resp)
             elif d == "b":
                 try:
@@ -262,7 +260,7 @@ def interactive() -> None:
         # 修改 spread(bps)
         if choice == 7:
             try:
-                bps = input("请输入最小spread(bps)，或输入 auto 切回自动模式: ").strip()
+                bps = input("请输入最小spread(bps): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break

@@ -57,9 +57,9 @@ def main() -> None:
     logger.info("同所做市套利机器人启动")
     logger.info("testnet=%s | symbol_spot=%s | symbol_fut=%s",
                 testnet, cfg.symbol_spot, cfg.symbol_fut)
-    logger.info("maker返佣=%.4f%% | taker费=%.4f%% | 净成本=%.4f%% | 最小利润=%sbps",
+    logger.info("maker费=%.4f%% | taker费=%.4f%% | 最小spread=%.4fbps",
                 fee.spot_maker * 100, fee.fut_taker * 100,
-                fee.net_cost * 100, fee.min_profit_bps)
+                fee.min_spread_bps)
     logger.info("挂单范围: 买%d ~ 买%d | budget=%.6f 币, 单笔<=%s%%预算, <=%s%%档深",
                 cfg.min_level, cfg.max_level, cfg.total_budget,
                 cfg.budget_pct * 100, cfg.depth_ratio * 100)
