@@ -8,6 +8,8 @@
     python ctl.py stop
     python ctl.py budget
     python ctl.py budget 8000
+    python ctl.py spread
+    python ctl.py spread 1.5
 
 交互模式:
     python ctl.py
@@ -58,6 +60,8 @@ def print_resp(resp: dict) -> None:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
         print(f"现货累计成交: {resp.get('spot_filled_base', 0.0):.6f} 币")
         print(f"合约累计对冲: {resp.get('perp_hedged_base', 0.0):.6f} 币")
+        print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
+        print(f"当前最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
         spot_avg = resp.get("spot_avg_price")
         perp_avg = resp.get("perp_avg_price")
         print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
@@ -93,6 +97,9 @@ def print_resp(resp: dict) -> None:
 
     elif "budget" in resp and "paused" not in resp:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
+    elif "min_spread_bps" in resp:
+        print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
+        print(f"当前最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
 
 
 _MENU = [
@@ -103,6 +110,7 @@ _MENU = [
     ("修改预算", None, []),      # 需要额外输入
     ("停止机器人", "stop", []),
     ("执行平仓", None, []),      # 需要额外输入 symbol + qty
+    ("修改Spread", None, []),    # 需要额外输入 bps
     ("退出", None, []),
 ]
 
@@ -121,7 +129,7 @@ def interactive() -> None:
 
     while True:
         try:
-            line = input("请选择 [1-8]: ").strip()
+            line = input("请选择 [1-9]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -132,17 +140,17 @@ def interactive() -> None:
         try:
             choice = int(line)
         except ValueError:
-            print("请输入数字 1-8")
+            print("请输入数字 1-9")
             continue
 
         if choice < 1 or choice > len(_MENU):
-            print("请输入数字 1-8")
+            print("请输入数字 1-9")
             continue
 
         label, cmd, args = _MENU[choice - 1]
 
         # 退出
-        if choice == 8:
+        if choice == 9:
             break
 
         # 修改预算 —— 需要输入币数量
@@ -171,6 +179,20 @@ def interactive() -> None:
                 continue
             args = [qty] if not symbol else [symbol, qty]
             resp = send_cmd("close", args)
+            print_resp(resp)
+            _print_menu()
+            continue
+
+        # 修改 spread(bps)
+        if choice == 8:
+            try:
+                bps = input("请输入新的最小利润门槛（bps）: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not bps:
+                continue
+            resp = send_cmd("spread", [bps])
             print_resp(resp)
             _print_menu()
             continue

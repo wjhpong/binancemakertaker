@@ -134,6 +134,29 @@ class ControlServer:
             except ValueError:
                 return {"ok": False, "msg": "无效数字"}
 
+        elif cmd == "spread":
+            if not args:
+                snap = bot.get_status_snapshot()
+                return {
+                    "ok": True,
+                    "min_profit_bps": snap.get("min_profit_bps"),
+                    "min_spread_bps": snap.get("min_spread_bps"),
+                }
+            try:
+                bps = float(args[0])
+                if bps < 0:
+                    return {"ok": False, "msg": "spread(bps) 必须 >= 0"}
+                bot.set_min_profit_bps(bps)
+                snap = bot.get_status_snapshot()
+                return {
+                    "ok": True,
+                    "msg": f"最小利润门槛已设为 {bps:.4f} bps",
+                    "min_profit_bps": snap.get("min_profit_bps"),
+                    "min_spread_bps": snap.get("min_spread_bps"),
+                }
+            except ValueError:
+                return {"ok": False, "msg": "无效数字"}
+
         elif cmd == "status":
             snap = bot.get_status_snapshot()
             snap["ok"] = True

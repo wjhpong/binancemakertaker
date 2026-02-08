@@ -218,6 +218,14 @@ class SpotFuturesArbitrageBot:
             self.fh.cfg = self.cfg
         logger.info("[CMD] 总预算从 %.4f 币 改为 %.4f 币", old, new_budget)
 
+    def set_min_profit_bps(self, new_bps: float) -> None:
+        """运行时修改最小利润门槛（bps）。"""
+        from dataclasses import replace
+        with self._state_lock:
+            old = self.fee.min_profit_bps
+            self.fee = replace(self.fee, min_profit_bps=new_bps)
+        logger.info("[CMD] 最小利润门槛从 %.4f bps 改为 %.4f bps", old, new_bps)
+
     @property
     def total_filled_usdt(self) -> float:
         return self._total_filled_usdt
@@ -301,6 +309,8 @@ class SpotFuturesArbitrageBot:
                     if self.perp_avg_price is not None else None
                 ),
                 "perp_avg_priced_base": round(self.fh.total_hedged_base_priced, 6),
+                "min_profit_bps": round(self.fee.min_profit_bps, 4),
+                "min_spread_bps": round(self.fee.min_spread * 10000.0, 4),
                 "naked_exposure": round(self.naked_exposure, 4),
                 "close_task": dict(self._close_task_status),
                 "close_pending_hedge": round(self._close_pending_hedge, 6),
