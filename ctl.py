@@ -31,13 +31,23 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
     payload = json.dumps({"cmd": cmd, "args": args or []})
     # 用 socat 连接 Unix socket
     remote_cmd = f'echo {repr(payload)} | socat - UNIX-CONNECT:{SOCK_PATH}'
-    result = subprocess.run(
-        ["ssh", SSH_HOST, remote_cmd],
-        capture_output=True, text=True, timeout=10,
-    )
-    if result.returncode != 0:
+    for attempt in (1, 2):
+        result = subprocess.run(
+            ["ssh", SSH_HOST, remote_cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            break
         err = result.stderr.strip()
-        if "No such file" in err or "Connection refused" in err:
+        no_service = "No such file" in err or "Connection refused" in err
+        if cmd == "start" and attempt == 1 and no_service:
+            # 兜底：服务已停时，先拉起 systemd 服务再重试一次 socket
+            subprocess.run(
+                ["ssh", SSH_HOST, "sudo systemctl start arb-bot"],
+                capture_output=True, text=True, timeout=15,
+            )
+            continue
+        if no_service:
             return {"ok": False, "msg": "机器人未运行或控制服务未启动"}
         return {"ok": False, "msg": f"SSH 错误: {err}"}
 
@@ -57,10 +67,62 @@ def print_resp(resp: dict) -> None:
 
     if "paused" in resp:
         state = "暂停" if resp["paused"] else "运行中"
+        close_task = resp.get("close_task") or {}
+        close_running = close_task.get("running", False)
+
+        # 判断当前方向
+        if close_running:
+            direction = "平仓（卖出）"
+        else:
+            direction = "开仓（买入）"
+
         print(f"状态: {state}")
+        print(f"当前方向: {direction}")
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
-        print(f"现货累计成交: {resp.get('spot_filled_base', 0.0):.6f} 币")
-        print(f"合约累计对冲: {resp.get('perp_hedged_base', 0.0):.6f} 币")
+
+        # 根据方向显示进度
+        if close_running:
+            # 平仓模式：显示卖出进度
+            target = close_task.get("target_qty", 0.0)
+            sold = close_task.get("spot_sold", 0.0)
+            perp_bought = close_task.get("perp_bought", 0.0)
+            print(f"卖出进度: 已卖出 {sold:.6f} / {target:.6f} 币")
+            print(f"永续已买入对冲: {perp_bought:.6f} 币")
+            pending = close_task.get("pending_hedge", 0.0)
+            if pending > 1e-12:
+                print(f"待对冲: {pending:.6f} 币")
+            print(f"平仓状态: {close_task.get('msg', '-')}")
+            # 显示平仓活跃卖单
+            close_orders = close_task.get("open_orders") or []
+            if close_orders:
+                print(f"活跃卖单 ({len(close_orders)}):")
+                for o in close_orders:
+                    print(
+                        f"  卖单: price={o.get('price')}, qty={o.get('qty', 0.0):.2f}, "
+                        f"filled={o.get('filled', 0.0):.2f}, id={o.get('id')}"
+                    )
+            else:
+                print("活跃卖单: 无")
+        else:
+            # 开仓模式：显示买入进度
+            print(f"买入进度: 已买入 {resp.get('spot_filled_base', 0.0):.6f} 币")
+            print(f"永续已卖出对冲: {resp.get('perp_hedged_base', 0.0):.6f} 币")
+            # 显示开仓活跃买单
+            orders = resp.get("active_orders", [])
+            if orders:
+                print(f"活跃买单 ({len(orders)}):")
+                for o in orders:
+                    cur = o.get("current_level")
+                    if cur is not None:
+                        level_text = f"买{o['level']}(当前买{cur})"
+                    else:
+                        level_text = f"买{o['level']}(当前买5外)"
+                    print(f"  {level_text}: price={o['price']}, qty={o['qty']:.2f}, "
+                          f"hedged={o['hedged']:.2f}, id={o['id']}")
+            else:
+                print("活跃买单: 无")
+
+        # 通用信息
         mode = resp.get("spread_mode", "auto")
         print(f"Spread模式: {mode}")
         print(f"最小利润门槛: {resp.get('min_profit_bps', 0.0):.4f} bps")
@@ -73,38 +135,12 @@ def print_resp(resp: dict) -> None:
         if priced_base > 0:
             print(f"永续均价覆盖量: {priced_base:.6f} 币")
         print(f"裸露仓位: {resp['naked_exposure']:.4f}")
-        close_task = resp.get("close_task") or {}
-        if close_task:
-            close_state = "执行中" if close_task.get("running") else "空闲"
-            print(f"平仓任务: {close_state} | {close_task.get('msg', '-')}")
-            if "target_qty" in close_task:
-                print(
-                    f"平仓进度: 现货已卖 {close_task.get('spot_sold', 0.0):.6f} / "
-                    f"{close_task.get('target_qty', 0.0):.6f} 币, "
-                    f"永续已买 {close_task.get('perp_bought', 0.0):.6f} 币"
-                )
-            close_orders = close_task.get("open_orders") or []
-            if close_orders:
-                print(f"平仓活跃卖单 ({len(close_orders)}):")
-                for o in close_orders:
-                    print(
-                        f"  卖单: price={o.get('price')}, qty={o.get('qty', 0.0):.2f}, "
-                        f"filled={o.get('filled', 0.0):.2f}, id={o.get('id')}"
-                    )
-        print(f"平仓待对冲累计: {resp.get('close_pending_hedge', 0.0):.6f} 币")
-        orders = resp.get("active_orders", [])
-        if orders:
-            print(f"活跃挂单 ({len(orders)}):")
-            for o in orders:
-                cur = o.get("current_level")
-                if cur is not None:
-                    level_text = f"买{o['level']}(当前买{cur})"
-                else:
-                    level_text = f"买{o['level']}(当前买5外)"
-                print(f"  {level_text}: price={o['price']}, qty={o['qty']:.2f}, "
-                      f"hedged={o['hedged']:.2f}, id={o['id']}")
-        else:
-            print("活跃挂单: 无")
+
+        # 上次平仓结果（平仓已结束但有历史记录）
+        if not close_running and close_task.get("target_qty"):
+            print(f"上次平仓: {close_task.get('msg', '-')} "
+                  f"(卖出 {close_task.get('spot_sold', 0.0):.6f} / "
+                  f"{close_task.get('target_qty', 0.0):.6f} 币)")
 
     elif "budget" in resp and "paused" not in resp:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
@@ -117,13 +153,12 @@ def print_resp(resp: dict) -> None:
 
 _MENU = [
     ("查看状态", "status", []),
-    ("开始挂单", "start", []),
+    ("开始挂单", None, []),         # 选方向：开仓 / 平仓
     ("暂停挂单", "pause", []),
     ("查看预算", "budget", []),
-    ("修改预算", None, []),      # 需要额外输入
+    ("修改预算", None, []),          # 需要额外输入
     ("停止机器人", "stop", []),
-    ("执行平仓", None, []),      # 需要额外输入 symbol + qty
-    ("修改Spread", None, []),    # 需要额外输入 bps
+    ("修改Spread", None, []),       # 需要额外输入 bps
     ("退出", None, []),
 ]
 
@@ -142,7 +177,7 @@ def interactive() -> None:
 
     while True:
         try:
-            line = input("请选择 [1-9]: ").strip()
+            line = input(f"请选择 [1-{len(_MENU)}]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -153,18 +188,50 @@ def interactive() -> None:
         try:
             choice = int(line)
         except ValueError:
-            print("请输入数字 1-9")
+            print(f"请输入数字 1-{len(_MENU)}")
             continue
 
         if choice < 1 or choice > len(_MENU):
-            print("请输入数字 1-9")
+            print(f"请输入数字 1-{len(_MENU)}")
             continue
 
         label, cmd, args = _MENU[choice - 1]
 
         # 退出
-        if choice == 9:
+        if choice == 8:
             break
+
+        # 开始挂单 —— 选方向
+        if choice == 2:
+            try:
+                print("  a. 开仓（买入）")
+                print("  b. 平仓（卖出）")
+                d = input("请选择方向 [a/b]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if d == "a":
+                resp = send_cmd("start")
+                print_resp(resp)
+            elif d == "b":
+                try:
+                    qty = input("请输入平仓数量（币）: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if not qty:
+                    _print_menu()
+                    continue
+                resp = send_cmd("close", [qty])
+                if not resp.get("ok"):
+                    print(f"⚠ 平仓失败: {resp.get('msg', '未知错误')}")
+                else:
+                    print_resp(resp)
+            else:
+                print("无效选择")
+            _print_menu()
+            continue
 
         # 修改预算 —— 需要输入币数量
         if choice == 5:
@@ -180,29 +247,8 @@ def interactive() -> None:
             _print_menu()
             continue
 
-        # 执行平仓 —— 需要输入币种与数量
-        if choice == 7:
-            try:
-                symbol = input("请输入币种（例如 ASTER，回车默认当前币种）: ").strip().upper()
-                if symbol and not symbol.endswith("USDT"):
-                    symbol += "USDT"
-                qty = input("请输入平仓数量（币）: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if not qty:
-                continue
-            args = [qty] if not symbol else [symbol, qty]
-            resp = send_cmd("close", args)
-            if not resp.get("ok"):
-                print(f"⚠ 平仓失败: {resp.get('msg', '未知错误')}")
-            else:
-                print_resp(resp)
-            _print_menu()
-            continue
-
         # 修改 spread(bps)
-        if choice == 8:
+        if choice == 7:
             try:
                 bps = input("请输入最小spread(bps)，或输入 auto 切回自动模式: ").strip()
             except (EOFError, KeyboardInterrupt):

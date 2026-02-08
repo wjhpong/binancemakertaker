@@ -87,7 +87,7 @@ class ExchangeAdapter:
 @dataclass
 class LevelOrder:
     """跟踪单个档位的现货限价买单。"""
-    level_idx: int       # 2..5 (买二..买五)
+    level_idx: int       # 1..5 (买一..买五)
     order_id: str
     price: float
     qty: float
@@ -152,8 +152,8 @@ class SpotFuturesArbitrageBot:
         with self._state_lock:
             self._level_to_oid.pop(order.level_idx, None)
             self._active_orders.pop(oid, None)
-            # 买二完全成交后，要求撤掉其余档位并重挂买二/买三。
-            if order.level_idx == 2:
+            # 买一完全成交后，要求撤掉其余档位并重挂买一/买二/买三。
+            if order.level_idx == 1:
                 self._requote_all_levels = True
 
     @property
@@ -407,7 +407,14 @@ class SpotFuturesArbitrageBot:
         try:
             self.pause()
             time.sleep(self.cfg.poll_interval_sec * 2)
-            _update("已暂停开仓，开始执行平仓", {})
+            # 主动撤掉所有开仓买单，不依赖主循环
+            with self._state_lock:
+                if self._active_orders:
+                    logger.info("[CLOSE] 主动撤销 %d 笔开仓买单", len(self._active_orders))
+                    unhedged = self._cancel_all_orders()
+                    if unhedged > 1e-12:
+                        self.fh.try_hedge(unhedged)
+            _update("已暂停开仓并撤销买单，开始执行平仓", {})
 
             for _ in range(max_rounds):
                 remaining = max(0.0, target_qty - sold)
@@ -550,17 +557,17 @@ class SpotFuturesArbitrageBot:
 
     # ── 多档选档 + 深度加权分配 ───────────────────────────────
 
-    # 固定比例分配：买二 30%, 买三 70%
-    _LEVEL_WEIGHTS: dict[int, float] = {2: 0.30, 3: 0.70}
+    # 固定比例分配：买一 20%, 买二 30%, 买三 50%
+    _LEVEL_WEIGHTS: dict[int, float] = {1: 0.20, 2: 0.30, 3: 0.50}
 
     def _select_all_levels(
         self,
         spot_bids: list[tuple[float, float]],
         fut_bid: float,
     ) -> list[tuple[int, float, float]]:
-        """选出满足 spread 的档位（买二/买三），按固定比例分配预算。
+        """选出满足 spread 的档位（买一/买二/买三），按固定比例分配预算。
 
-        当前策略要求买二和买三必须同时满足条件，否则本轮不挂单。
+        当前策略要求买一、买二、买三必须同时满足条件，否则本轮不挂单。
         返回 [(level_idx, price, qty), ...] ，空列表表示本轮不挂。
         """
         if fut_bid <= 0:
@@ -873,7 +880,7 @@ class SpotFuturesArbitrageBot:
                 # 再做一次成交对账（覆盖本轮下单后的成交事件）
                 self._check_fills_and_hedge()
 
-                # 若买二已完全成交，则撤掉其余档位并在下一轮重挂买二/买三
+                # 若买一已完全成交，则撤掉其余档位并在下一轮重挂买一/买二/买三
                 if self._requote_all_levels:
                     self._requote_all_levels = False
                     unhedged = self._cancel_all_orders()
@@ -905,8 +912,8 @@ def main() -> None:
         symbol_fut="ASTERUSDT",
         tick_size_spot=0.001,
         total_budget=4000.0,
-        min_level=2,
-        max_level=5,
+        min_level=1,
+        max_level=3,
     )
 
     adapter = ExchangeAdapter()

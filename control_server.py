@@ -106,6 +106,8 @@ class ControlServer:
                 qty_arg = args[0]
             elif len(args) >= 2:
                 symbol = str(args[0]).upper()
+                if not symbol.endswith("USDT"):
+                    symbol += "USDT"
                 qty_arg = args[1]
             else:
                 return {"ok": False, "msg": "用法: close [symbol] qty"}
