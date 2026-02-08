@@ -91,15 +91,21 @@ class ControlServer:
                     if new_budget <= 0:
                         return {"ok": False, "msg": "预算必须 > 0"}
                     bot.set_budget(new_budget)
+                    # 新预算意味着新一轮开仓，清零统计计数（现货/永续保持同口径）
+                    bot.fh.total_filled_base = 0.0
+                    bot.fh.total_filled_usdt = 0.0
+                    bot.fh.total_hedged_base = 0.0
+                    bot.fh.total_hedged_base_priced = 0.0
+                    bot.fh.total_hedged_quote = 0.0
                 except ValueError:
                     return {"ok": False, "msg": "无效数字"}
             if bot.is_paused:
                 bot.resume()
                 if args:
-                    return {"ok": True, "msg": f"预算已设为 {new_budget:.6f} 币，已恢复挂单"}
+                    return {"ok": True, "msg": f"新一轮开仓: 预算 {new_budget:.6f} 币，已恢复挂单"}
                 return {"ok": True, "msg": "已恢复挂单"}
             if args:
-                return {"ok": True, "msg": f"预算已设为 {new_budget:.6f} 币，已在运行中"}
+                return {"ok": True, "msg": f"新一轮开仓: 预算 {new_budget:.6f} 币，已在运行中"}
             return {"ok": True, "msg": "已在运行中"}
 
         elif cmd == "pause":
