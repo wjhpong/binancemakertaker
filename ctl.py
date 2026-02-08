@@ -4,6 +4,7 @@
 用法:
     python ctl.py status
     python ctl.py start
+    python ctl.py start 10000
     python ctl.py pause
     python ctl.py stop
     python ctl.py budget
@@ -212,6 +213,17 @@ def interactive() -> None:
                 break
 
             if d == "a":
+                try:
+                    qty = input("请输入本次开仓总币数量（直接回车=不修改）: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if qty:
+                    budget_resp = send_cmd("budget", [qty])
+                    print_resp(budget_resp)
+                    if not budget_resp.get("ok"):
+                        _print_menu()
+                        continue
                 resp = send_cmd("start")
                 print_resp(resp)
             elif d == "b":

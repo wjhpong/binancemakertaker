@@ -85,9 +85,21 @@ class ControlServer:
         bot = self.bot
 
         if cmd == "start":
+            if args:
+                try:
+                    new_budget = float(args[0])
+                    if new_budget <= 0:
+                        return {"ok": False, "msg": "预算必须 > 0"}
+                    bot.set_budget(new_budget)
+                except ValueError:
+                    return {"ok": False, "msg": "无效数字"}
             if bot.is_paused:
                 bot.resume()
+                if args:
+                    return {"ok": True, "msg": f"预算已设为 {new_budget:.6f} 币，已恢复挂单"}
                 return {"ok": True, "msg": "已恢复挂单"}
+            if args:
+                return {"ok": True, "msg": f"预算已设为 {new_budget:.6f} 币，已在运行中"}
             return {"ok": True, "msg": "已在运行中"}
 
         elif cmd == "pause":
