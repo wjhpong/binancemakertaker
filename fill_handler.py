@@ -126,7 +126,7 @@ class FillHandler:
         if self.fill_queue is not None:
             order_fills = self.drain_fill_queue()
             # 兜底对账：定期用 REST 校验，避免 WS 丢包导致漏对冲
-            if now - self._last_rest_reconcile_ts >= 2.0:
+            if now - self._last_rest_reconcile_ts >= 10.0:
                 for oid in list(self._active_orders.keys()):
                     filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
                     if filled >= 0:

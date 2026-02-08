@@ -857,6 +857,14 @@ class SpotFuturesArbitrageBot:
                         self._try_hedge(unhedged)
                     # 不 continue，下面会重新选档挂单
 
+                # 买一完全成交 → 先全撤再重挂，避免挂完又撤的浪费
+                if self._requote_all_levels:
+                    self._requote_all_levels = False
+                    unhedged = self._cancel_all_orders()
+                    if unhedged > 1e-12:
+                        self._try_hedge(unhedged)
+                    # 不 continue，直接进入下面的选档重挂
+
                 # 多档选档
                 desired = self._select_all_levels(spot_bids, fut_bid)
 
@@ -878,15 +886,6 @@ class SpotFuturesArbitrageBot:
 
                 # 再做一次成交对账（覆盖本轮下单后的成交事件）
                 self._check_fills_and_hedge()
-
-                # 若买一已完全成交，则撤掉其余档位并在下一轮重挂买一/买二/买三
-                if self._requote_all_levels:
-                    self._requote_all_levels = False
-                    unhedged = self._cancel_all_orders()
-                    if unhedged > 1e-12:
-                        self._try_hedge(unhedged)
-                    time.sleep(self.cfg.poll_interval_sec)
-                    continue
 
                 time.sleep(self.cfg.poll_interval_sec)
 
