@@ -118,6 +118,14 @@ class ControlServer:
             bot.stop()
             return {"ok": True, "msg": "正在停止..."}
 
+        elif cmd == "pause_close":
+            ok, msg = bot.pause_close_task()
+            return {"ok": ok, "msg": msg}
+
+        elif cmd == "resume_close":
+            ok, msg = bot.resume_close_task()
+            return {"ok": ok, "msg": msg}
+
         elif cmd == "close":
             if len(args) == 1:
                 symbol = bot.cfg.symbol_spot

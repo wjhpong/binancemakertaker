@@ -95,6 +95,9 @@ def print_resp(resp: dict) -> None:
         # 根据方向显示进度
         if close_running:
             # 平仓模式：显示卖出进度
+            close_paused = close_task.get("paused", False)
+            if close_paused:
+                print("⏸ 平仓已暂停")
             target = close_task.get("target_qty", 0.0)
             sold = close_task.get("spot_sold", 0.0)
             perp_bought = close_task.get("perp_bought", 0.0)
@@ -160,7 +163,8 @@ def print_resp(resp: dict) -> None:
 _MENU = [
     ("查看状态", "status", []),
     ("开始挂单", None, []),         # 选方向：开仓 / 平仓
-    ("暂停挂单", "pause", []),
+    ("暂停", None, []),             # 智能暂停：开仓→暂停开仓，平仓→暂停平仓
+    ("恢复", None, []),             # 智能恢复：开仓→恢复开仓，平仓→恢复平仓
     ("查看预算", "budget", []),
     ("修改预算", None, []),          # 需要额外输入
     ("停止机器人", "stop", []),
@@ -245,8 +249,32 @@ def interactive() -> None:
             _print_menu()
             continue
 
+        # 暂停 —— 先查状态判断方向
+        if choice == 3:
+            status = send_cmd("status")
+            close_task = (status.get("close_task") or {})
+            if close_task.get("running"):
+                resp = send_cmd("pause_close")
+            else:
+                resp = send_cmd("pause")
+            print_resp(resp)
+            _print_menu()
+            continue
+
+        # 恢复 —— 先查状态判断方向
+        if choice == 4:
+            status = send_cmd("status")
+            close_task = (status.get("close_task") or {})
+            if close_task.get("running"):
+                resp = send_cmd("resume_close")
+            else:
+                resp = send_cmd("start")
+            print_resp(resp)
+            _print_menu()
+            continue
+
         # 修改预算 —— 需要输入币数量
-        if choice == 5:
+        if choice == 6:
             try:
                 amt = input("请输入新预算（币数量）: ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -260,7 +288,7 @@ def interactive() -> None:
             continue
 
         # 修改 spread(bps)
-        if choice == 7:
+        if choice == 8:
             try:
                 bps = input("请输入最小spread(bps): ").strip()
             except (EOFError, KeyboardInterrupt):

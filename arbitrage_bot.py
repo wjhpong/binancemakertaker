@@ -115,6 +115,7 @@ class SpotFuturesArbitrageBot:
         self._requote_all_levels: bool = False
         self._close_task_lock = threading.Lock()
         self._close_task_running: bool = False
+        self._close_task_paused: bool = False
         self._close_task_status: dict = {"running": False}
         self._close_pending_hedge: float = 0.0
         # 飞书通知器（可选）
@@ -308,7 +309,7 @@ class SpotFuturesArbitrageBot:
                 "perp_avg_priced_base": round(self.fh.total_hedged_base_priced, 6),
                 "min_spread_bps": round(self.fee.min_spread_bps, 4),
                 "naked_exposure": round(self.naked_exposure, 4),
-                "close_task": dict(self._close_task_status),
+                "close_task": {**self._close_task_status, "paused": self._close_task_paused},
                 "close_pending_hedge": round(self._close_pending_hedge, 6),
             }
         # active_orders 涉及 REST 调用（推断当前档位），在锁外执行避免阻塞主循环
@@ -349,6 +350,28 @@ class SpotFuturesArbitrageBot:
         )
         th.start()
         return True, f"已启动平仓任务: {symbol} {qty:.6f} 币"
+
+    def pause_close_task(self) -> tuple[bool, str]:
+        """暂停平仓任务（撤掉当前卖单，等待恢复）。"""
+        with self._close_task_lock:
+            if not self._close_task_running:
+                return False, "没有正在执行的平仓任务"
+            if self._close_task_paused:
+                return False, "平仓任务已经是暂停状态"
+            self._close_task_paused = True
+        logger.info("[CLOSE] 平仓任务暂停")
+        return True, "平仓任务已暂停"
+
+    def resume_close_task(self) -> tuple[bool, str]:
+        """恢复平仓任务。"""
+        with self._close_task_lock:
+            if not self._close_task_running:
+                return False, "没有正在执行的平仓任务"
+            if not self._close_task_paused:
+                return False, "平仓任务已经在执行中"
+            self._close_task_paused = False
+        logger.info("[CLOSE] 平仓任务恢复")
+        return True, "平仓任务已恢复"
 
     def _run_close_task(self, symbol: str, target_qty: float) -> None:
         sold = 0.0
@@ -397,6 +420,15 @@ class SpotFuturesArbitrageBot:
             _update("已暂停开仓并撤销买单，开始执行平仓", {})
 
             for _ in range(max_rounds):
+                # 暂停检测：撤掉卖单后等待恢复
+                if self._close_task_paused:
+                    _update("平仓已暂停，等待恢复指令", {})
+                    while self._close_task_paused and self._close_task_running:
+                        time.sleep(self.cfg.poll_interval_sec)
+                    if not self._close_task_running:
+                        break
+                    _update("平仓已恢复", {})
+
                 remaining = max(0.0, target_qty - sold)
                 if remaining < self.cfg.min_order_qty:
                     break
@@ -408,42 +440,50 @@ class SpotFuturesArbitrageBot:
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
-                # 平仓只挂卖二/卖三（避免挂卖一被立即吃掉导致滑点）
-                price2 = asks[1][0]
-                price3 = asks[2][0]
-                spread2 = (price2 - fut_ask) / price2 if price2 > 0 else -1
-                spread3 = (price3 - fut_ask) / price3 if price3 > 0 else -1
-                if spread2 < self.min_spread or spread3 < self.min_spread:
+                # 平仓挂 3 档卖单（卖一/卖二/卖三），与开仓对称
+                lot = self.cfg.lot_size
+                level_prices: list[tuple[float, float]] = []  # (price, weight)
+                all_ok = True
+                for lvl_idx, weight in self._LEVEL_WEIGHTS.items():
+                    if lvl_idx > len(asks):
+                        all_ok = False
+                        break
+                    ask_price = asks[lvl_idx - 1][0]
+                    if ask_price <= 0:
+                        all_ok = False
+                        break
+                    spread = (ask_price - fut_ask) / ask_price if ask_price > 0 else -1
+                    if spread < self.min_spread:
+                        all_ok = False
+                        break
+                    level_prices.append((ask_price, weight))
+                if not all_ok or not level_prices:
                     _update("平仓价差未达门槛，等待", {})
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
-                qty2 = self._floor_to_lot(remaining * self._LEVEL_WEIGHTS[2])
-                qty3 = self._floor_to_lot(remaining - qty2)
-
-                # Notional 下限：确保 price × qty >= 5.5 USDT
-                lot = self.cfg.lot_size
-                min_notional_qty2 = int(5.5 / price2 / lot + 1) * lot if price2 > 0 else 0
-                min_notional_qty3 = int(5.5 / price3 / lot + 1) * lot if price3 > 0 else 0
-                if 0 < qty2 < min_notional_qty2:
-                    qty2 = min_notional_qty2
-                if 0 < qty3 < min_notional_qty3:
-                    qty3 = min_notional_qty3
-
-                if qty2 < self.cfg.min_order_qty and qty3 >= self.cfg.min_order_qty:
-                    qty2 = 0.0
-                if qty3 < self.cfg.min_order_qty and qty2 >= self.cfg.min_order_qty:
-                    qty3 = self._floor_to_lot(remaining)
-                if qty2 < self.cfg.min_order_qty and qty3 < self.cfg.min_order_qty:
-                    break
+                # 按权重分配数量
+                level_qtys: list[tuple[float, float]] = []  # (price, qty)
+                allocated = 0.0
+                for i, (price, weight) in enumerate(level_prices):
+                    if i == len(level_prices) - 1:
+                        qty = self._floor_to_lot(remaining - allocated)
+                    else:
+                        qty = self._floor_to_lot(remaining * weight)
+                        allocated += qty
+                    # Notional 下限：确保 price × qty >= 5.5 USDT
+                    min_notional_qty = int(5.5 / price / lot + 1) * lot if price > 0 else 0
+                    if 0 < qty < min_notional_qty:
+                        qty = min_notional_qty
+                    level_qtys.append((price, qty))
 
                 open_orders: dict[str, dict] = {}
-                if qty2 >= self.cfg.min_order_qty:
-                    oid2 = self.adapter.place_spot_limit_sell(symbol, price2, qty2)
-                    open_orders[oid2] = {"price": price2, "qty": qty2, "filled": 0.0}
-                if qty3 >= self.cfg.min_order_qty:
-                    oid3 = self.adapter.place_spot_limit_sell(symbol, price3, qty3)
-                    open_orders[oid3] = {"price": price3, "qty": qty3, "filled": 0.0}
+                for price, qty in level_qtys:
+                    if qty >= self.cfg.min_order_qty:
+                        oid = self.adapter.place_spot_limit_sell(symbol, price, qty)
+                        open_orders[oid] = {"price": price, "qty": qty, "filled": 0.0}
+                if not open_orders:
+                    break
                 _update(f"已挂平仓卖单 {len(open_orders)} 笔", open_orders)
 
                 started = time.time()
