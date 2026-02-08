@@ -122,6 +122,7 @@ class SpotFuturesArbitrageBot:
         self._close_task_lock = threading.Lock()
         self._close_task_running: bool = False
         self._close_task_status: dict = {"running": False}
+        self._close_pending_hedge: float = 0.0
 
         # 飞书通知器（可选）
         self._notifier = None
@@ -301,6 +302,7 @@ class SpotFuturesArbitrageBot:
                 ),
                 "naked_exposure": round(self.naked_exposure, 4),
                 "close_task": dict(self._close_task_status),
+                "close_pending_hedge": round(self._close_pending_hedge, 6),
                 "active_orders": self.get_active_orders_snapshot(),
             }
 
@@ -341,7 +343,8 @@ class SpotFuturesArbitrageBot:
     def _run_close_task(self, symbol: str, target_qty: float) -> None:
         sold = 0.0
         perp_bought = 0.0
-        pending_hedge = 0.0
+        with self._close_task_lock:
+            pending_hedge = max(0.0, self._close_pending_hedge)
         max_rounds = 200
         max_wait_sec = 8.0
 
@@ -459,6 +462,7 @@ class SpotFuturesArbitrageBot:
 
             msg = "平仓完成" if (target_qty - sold) <= self.cfg.min_order_qty else "平仓结束（未完全成交）"
             with self._close_task_lock:
+                self._close_pending_hedge = max(0.0, pending_hedge)
                 self._close_task_status = {
                     "running": False,
                     "symbol": symbol,
@@ -472,6 +476,7 @@ class SpotFuturesArbitrageBot:
         except Exception as exc:
             logger.exception("[CLOSE] 平仓任务失败")
             with self._close_task_lock:
+                self._close_pending_hedge = max(0.0, pending_hedge)
                 self._close_task_status = {
                     "running": False,
                     "symbol": symbol,
@@ -702,7 +707,7 @@ class SpotFuturesArbitrageBot:
                 return False
 
         # 4. 有裸露仓位则暂停
-        if self.naked_exposure > 0:
+        if self.naked_exposure >= self.cfg.lot_size:
             logger.warning("[RISK] 裸露仓位 %.4f，暂停新开仓", self.naked_exposure)
             self._cancel_all_orders()
             return False

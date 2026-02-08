@@ -206,18 +206,19 @@ class FillHandler:
 
     def try_hedge(self, qty: float) -> tuple[bool, float]:
         """合约市价卖出对冲，带重试。返回 (成功, 实际对冲量)。"""
-        if qty <= 0:
+        if qty <= 0 and self.naked_exposure <= 0:
             return True, 0.0
         lot = self.cfg.lot_size
-        hedge_qty = int(qty / lot) * lot
-        residual = max(0.0, qty - hedge_qty)
+        total_to_hedge = max(0.0, qty + self.naked_exposure)
+        hedge_qty = int(total_to_hedge / lot) * lot
+        residual = max(0.0, total_to_hedge - hedge_qty)
         if hedge_qty < lot:
-            self.naked_exposure += qty
-            logger.warning(
-                "[HEDGE] 需对冲量 %.8f 小于 lot_size=%s，计入裸露仓位",
-                qty, lot
+            self.naked_exposure = total_to_hedge
+            logger.info(
+                "[HEDGE] 待对冲累计 %.8f 小于 lot_size=%s，继续累计等待",
+                total_to_hedge, lot
             )
-            return False, 0.0
+            return True, 0.0
 
         for i in range(self.cfg.max_retry):
             try:
@@ -238,8 +239,8 @@ class FillHandler:
                 self.total_hedged_base += hedge_qty
                 if hedge_price and hedge_price > 0:
                     self.total_hedged_quote += hedge_qty * hedge_price
+                self.naked_exposure = residual
                 if residual > 1e-12:
-                    self.naked_exposure += residual
                     logger.warning(
                         "[HEDGE] 对冲后残余 %.8f 未覆盖，计入裸露仓位",
                         residual
@@ -252,7 +253,7 @@ class FillHandler:
                     time.sleep(0.15)
 
         logger.critical("[HEDGE] 对冲彻底失败! qty=%s 转入裸露仓位", hedge_qty)
-        self.naked_exposure += qty
+        self.naked_exposure = total_to_hedge
         if self.trade_logger:
             self.trade_logger.log_hedge(self.cfg.symbol_fut, "", hedge_qty, success=False)
         return False, 0.0
@@ -262,6 +263,12 @@ class FillHandler:
     def try_recover_naked_exposure(self) -> bool:
         """尝试对冲裸露仓位，返回是否恢复成功。"""
         if self.naked_exposure <= 0:
+            return True
+        if self.naked_exposure < self.cfg.lot_size:
+            logger.info(
+                "[RECOVER] 裸露仓位 %.8f 小于 lot_size=%s，等待后续成交累计",
+                self.naked_exposure, self.cfg.lot_size,
+            )
             return True
         logger.warning("[RECOVER] 尝试恢复裸露仓位: %s", self.naked_exposure)
         for i in range(self.cfg.max_retry):

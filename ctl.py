@@ -73,6 +73,7 @@ def print_resp(resp: dict) -> None:
                     f"{close_task.get('target_qty', 0.0):.6f} 币, "
                     f"永续已买 {close_task.get('perp_bought', 0.0):.6f} 币"
                 )
+        print(f"平仓待对冲累计: {resp.get('close_pending_hedge', 0.0):.6f} 币")
         orders = resp.get("active_orders", [])
         if orders:
             print(f"活跃挂单 ({len(orders)}):")
