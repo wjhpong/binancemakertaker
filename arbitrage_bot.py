@@ -53,13 +53,22 @@ class ExchangeAdapter:
     def get_futures_best_bid(self, symbol_fut: str) -> float:
         raise NotImplementedError
 
+    def get_futures_best_ask(self, symbol_fut: str) -> float:
+        raise NotImplementedError
+
     def get_spot_depth(self, symbol_spot: str, levels: int = 5) -> list[tuple[float, float]]:
+        raise NotImplementedError
+
+    def get_spot_asks(self, symbol_spot: str, levels: int = 5) -> list[tuple[float, float]]:
         raise NotImplementedError
 
     def get_spot_open_bid_order(self, symbol_spot: str) -> Optional[dict]:
         raise NotImplementedError
 
     def place_spot_limit_buy(self, symbol_spot: str, price: float, qty: float) -> str:
+        raise NotImplementedError
+
+    def place_spot_limit_sell(self, symbol_spot: str, price: float, qty: float) -> str:
         raise NotImplementedError
 
     def cancel_order(self, symbol: str, order_id: str) -> None:
@@ -69,6 +78,9 @@ class ExchangeAdapter:
         raise NotImplementedError
 
     def place_futures_market_sell(self, symbol_fut: str, qty: float) -> str:
+        raise NotImplementedError
+
+    def place_futures_market_buy(self, symbol_fut: str, qty: float) -> str:
         raise NotImplementedError
 
 
@@ -107,6 +119,9 @@ class SpotFuturesArbitrageBot:
         self._running: bool = True
         self._paused: bool = False
         self._requote_all_levels: bool = False
+        self._close_task_lock = threading.Lock()
+        self._close_task_running: bool = False
+        self._close_task_status: dict = {"running": False}
 
         # 飞书通知器（可选）
         self._notifier = None
@@ -285,8 +300,188 @@ class SpotFuturesArbitrageBot:
                     if self.perp_avg_price is not None else None
                 ),
                 "naked_exposure": round(self.naked_exposure, 4),
+                "close_task": dict(self._close_task_status),
                 "active_orders": self.get_active_orders_snapshot(),
             }
+
+    def _floor_to_lot(self, qty: float) -> float:
+        lot = self.cfg.lot_size
+        return int(max(0.0, qty) / lot) * lot
+
+    def start_close_task(self, symbol: str, qty: float) -> tuple[bool, str]:
+        """启动平仓任务（异步）。"""
+        symbol = symbol.strip().upper()
+        if symbol != self.cfg.symbol_spot:
+            return False, f"当前仅支持 {self.cfg.symbol_spot}"
+        if qty <= 0:
+            return False, "数量必须 > 0"
+
+        with self._close_task_lock:
+            if self._close_task_running:
+                return False, "已有平仓任务在执行"
+            self._close_task_running = True
+            self._close_task_status = {
+                "running": True,
+                "symbol": symbol,
+                "target_qty": round(qty, 6),
+                "spot_sold": 0.0,
+                "perp_bought": 0.0,
+                "msg": "平仓任务启动",
+            }
+
+        th = threading.Thread(
+            target=self._run_close_task,
+            args=(symbol, qty),
+            daemon=True,
+            name="close-task",
+        )
+        th.start()
+        return True, f"已启动平仓任务: {symbol} {qty:.6f} 币"
+
+    def _run_close_task(self, symbol: str, target_qty: float) -> None:
+        sold = 0.0
+        perp_bought = 0.0
+        pending_hedge = 0.0
+        max_rounds = 200
+        max_wait_sec = 8.0
+
+        def _update(msg: str) -> None:
+            with self._close_task_lock:
+                self._close_task_status.update(
+                    {
+                        "running": True,
+                        "spot_sold": round(sold, 6),
+                        "perp_bought": round(perp_bought, 6),
+                        "pending_hedge": round(pending_hedge, 6),
+                        "msg": msg,
+                    }
+                )
+
+        try:
+            self.pause()
+            time.sleep(self.cfg.poll_interval_sec * 2)
+            _update("已暂停开仓，开始执行平仓")
+
+            for _ in range(max_rounds):
+                remaining = max(0.0, target_qty - sold)
+                if remaining < self.cfg.min_order_qty:
+                    break
+
+                asks = self.adapter.get_spot_asks(symbol, levels=5)
+                fut_ask = self.adapter.get_futures_best_ask(self.cfg.symbol_fut)
+                if len(asks) < 3 or fut_ask <= 0:
+                    _update("盘口不足，等待下一轮")
+                    time.sleep(self.cfg.poll_interval_sec)
+                    continue
+
+                price2 = asks[1][0]
+                price3 = asks[2][0]
+                spread2 = (price2 - fut_ask) / price2 if price2 > 0 else -1
+                spread3 = (price3 - fut_ask) / price3 if price3 > 0 else -1
+                if spread2 < self.fee.min_spread or spread3 < self.fee.min_spread:
+                    _update("平仓价差未达门槛，等待")
+                    time.sleep(self.cfg.poll_interval_sec)
+                    continue
+
+                qty2 = self._floor_to_lot(remaining * self._LEVEL_WEIGHTS[2])
+                qty3 = self._floor_to_lot(remaining - qty2)
+                if qty2 < self.cfg.min_order_qty and qty3 >= self.cfg.min_order_qty:
+                    qty2 = 0.0
+                if qty3 < self.cfg.min_order_qty and qty2 >= self.cfg.min_order_qty:
+                    qty3 = self._floor_to_lot(remaining)
+                if qty2 < self.cfg.min_order_qty and qty3 < self.cfg.min_order_qty:
+                    break
+
+                open_orders: dict[str, dict] = {}
+                if qty2 >= self.cfg.min_order_qty:
+                    oid2 = self.adapter.place_spot_limit_sell(symbol, price2, qty2)
+                    open_orders[oid2] = {"price": price2, "qty": qty2, "filled": 0.0}
+                if qty3 >= self.cfg.min_order_qty:
+                    oid3 = self.adapter.place_spot_limit_sell(symbol, price3, qty3)
+                    open_orders[oid3] = {"price": price3, "qty": qty3, "filled": 0.0}
+                _update(f"已挂平仓卖单 {len(open_orders)} 笔")
+
+                started = time.time()
+                while open_orders and (time.time() - started) < max_wait_sec:
+                    asks_now = self.adapter.get_spot_asks(symbol, levels=5)
+                    ask5 = asks_now[4][0] if len(asks_now) >= 5 else None
+                    drift = False
+
+                    for oid, info in list(open_orders.items()):
+                        filled = self.adapter.get_order_filled_qty(symbol, oid)
+                        if filled < 0:
+                            continue
+                        new_fill = max(0.0, filled - info["filled"])
+                        if new_fill > 1e-12:
+                            info["filled"] = filled
+                            sold += new_fill
+                            pending_hedge += new_fill
+                            _update("检测到平仓成交，执行永续买入对冲")
+                            hedge_qty = self._floor_to_lot(pending_hedge)
+                            if hedge_qty >= self.cfg.lot_size:
+                                self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
+                                perp_bought += hedge_qty
+                                pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                        if filled >= info["qty"] - 1e-12:
+                            open_orders.pop(oid, None)
+
+                        if ask5 is not None and info["price"] > ask5 + self.cfg.tick_size_spot * 0.5:
+                            drift = True
+
+                    if drift:
+                        _update("卖单已掉出卖五，撤单重挂")
+                        break
+                    time.sleep(0.25)
+
+                for oid, info in list(open_orders.items()):
+                    before = self.adapter.get_order_filled_qty(symbol, oid)
+                    self.adapter.cancel_order(symbol, oid)
+                    after = self.adapter.get_order_filled_qty(symbol, oid)
+                    final_filled = info["filled"]
+                    if before >= 0:
+                        final_filled = max(final_filled, before)
+                    if after >= 0:
+                        final_filled = max(final_filled, after)
+                    new_fill = max(0.0, final_filled - info["filled"])
+                    if new_fill > 1e-12:
+                        sold += new_fill
+                        pending_hedge += new_fill
+                    open_orders.pop(oid, None)
+
+                hedge_qty = self._floor_to_lot(pending_hedge)
+                if hedge_qty >= self.cfg.lot_size:
+                    self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
+                    perp_bought += hedge_qty
+                    pending_hedge = max(0.0, pending_hedge - hedge_qty)
+
+                _update("本轮平仓完成，检查剩余数量")
+                time.sleep(self.cfg.poll_interval_sec)
+
+            msg = "平仓完成" if (target_qty - sold) <= self.cfg.min_order_qty else "平仓结束（未完全成交）"
+            with self._close_task_lock:
+                self._close_task_status = {
+                    "running": False,
+                    "symbol": symbol,
+                    "target_qty": round(target_qty, 6),
+                    "spot_sold": round(sold, 6),
+                    "perp_bought": round(perp_bought, 6),
+                    "pending_hedge": round(pending_hedge, 6),
+                    "msg": msg,
+                }
+                self._close_task_running = False
+        except Exception as exc:
+            logger.exception("[CLOSE] 平仓任务失败")
+            with self._close_task_lock:
+                self._close_task_status = {
+                    "running": False,
+                    "symbol": symbol,
+                    "target_qty": round(target_qty, 6),
+                    "spot_sold": round(sold, 6),
+                    "perp_bought": round(perp_bought, 6),
+                    "pending_hedge": round(pending_hedge, 6),
+                    "msg": f"失败: {exc}",
+                }
+                self._close_task_running = False
 
     # ── 多档选档 + 深度加权分配 ───────────────────────────────
 

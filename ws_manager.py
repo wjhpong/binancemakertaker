@@ -59,10 +59,19 @@ class PriceCache:
         with self._lock:
             return self._fut_bid
 
+    def get_futures_ask(self) -> Optional[float]:
+        with self._lock:
+            return self._fut_ask
+
     def get_spot_bids(self, n: int = 20) -> list[tuple[float, float]]:
         """返回现货买盘前 n 档 [(price, qty), ...]，价格从高到低。"""
         with self._lock:
             return self._spot_bids[:n]
+
+    def get_spot_asks(self, n: int = 20) -> list[tuple[float, float]]:
+        """返回现货卖盘前 n 档 [(price, qty), ...]，价格从低到高。"""
+        with self._lock:
+            return self._spot_asks[:n]
 
     def get_spot_best_bid(self) -> Optional[float]:
         with self._lock:

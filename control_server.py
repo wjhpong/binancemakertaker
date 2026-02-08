@@ -100,6 +100,22 @@ class ControlServer:
             bot.stop()
             return {"ok": True, "msg": "正在停止..."}
 
+        elif cmd == "close":
+            if len(args) == 1:
+                symbol = bot.cfg.symbol_spot
+                qty_arg = args[0]
+            elif len(args) >= 2:
+                symbol = str(args[0]).upper()
+                qty_arg = args[1]
+            else:
+                return {"ok": False, "msg": "用法: close [symbol] qty"}
+            try:
+                qty = float(qty_arg)
+            except ValueError:
+                return {"ok": False, "msg": "无效数量"}
+            ok, msg = bot.start_close_task(symbol, qty)
+            return {"ok": ok, "msg": msg}
+
         elif cmd == "budget":
             if not args:
                 snap = bot.get_status_snapshot()

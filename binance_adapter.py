@@ -158,6 +158,17 @@ class BinanceAdapter(ExchangeAdapter):
         resp = self.futures.book_ticker(symbol=symbol_fut)
         return float(resp["bidPrice"])
 
+    def get_futures_best_ask(self, symbol_fut: str) -> float:
+        if self.price_cache is not None:
+            ask = self.price_cache.get_futures_ask()
+            if ask is not None and not self.price_cache.is_stale():
+                return ask
+            logger.debug("WS 价格缓存过期或为空，回退到 REST")
+
+        self._fut_limiter.wait_if_needed(weight=2)
+        resp = self.futures.book_ticker(symbol=symbol_fut)
+        return float(resp["askPrice"])
+
     def get_spot_depth(self, symbol_spot: str, levels: int = 5) -> list[tuple[float, float]]:
         """返回现货买盘深度，优先 WS 缓存，回退 REST。"""
         if self.price_cache is not None:
@@ -170,6 +181,19 @@ class BinanceAdapter(ExchangeAdapter):
         resp = self.spot.depth(symbol=symbol_spot, limit=levels)
         bids = [(float(p), float(q)) for p, q in resp.get("bids", [])]
         return bids
+
+    def get_spot_asks(self, symbol_spot: str, levels: int = 5) -> list[tuple[float, float]]:
+        """返回现货卖盘深度，优先 WS 缓存，回退 REST。"""
+        if self.price_cache is not None:
+            asks = self.price_cache.get_spot_asks(n=levels)
+            if asks and not self.price_cache.is_spot_depth_stale():
+                return asks
+            logger.debug("WS 现货深度缓存过期或为空，回退到 REST")
+
+        self._spot_limiter.wait_if_needed(weight=5)
+        resp = self.spot.depth(symbol=symbol_spot, limit=levels)
+        asks = [(float(p), float(q)) for p, q in resp.get("asks", [])]
+        return asks
 
     def get_spot_open_bid_order(self, symbol_spot: str) -> Optional[dict]:
         self._spot_limiter.wait_if_needed(weight=3)
@@ -198,6 +222,20 @@ class BinanceAdapter(ExchangeAdapter):
         )
         order_id = str(resp["orderId"])
         logger.info("现货限价买单已下: order_id=%s, price=%s, qty=%s", order_id, price, qty)
+        return order_id
+
+    def place_spot_limit_sell(self, symbol_spot: str, price: float, qty: float) -> str:
+        self._spot_limiter.wait_if_needed(weight=1)
+        resp = self.spot.new_order(
+            symbol=symbol_spot,
+            side="SELL",
+            type="LIMIT",
+            timeInForce="GTC",
+            quantity=_fmt_decimal(qty),
+            price=_fmt_decimal(price),
+        )
+        order_id = str(resp["orderId"])
+        logger.info("现货限价卖单已下: order_id=%s, price=%s, qty=%s", order_id, price, qty)
         return order_id
 
     def cancel_order(self, symbol: str, order_id: str) -> None:
@@ -240,6 +278,20 @@ class BinanceAdapter(ExchangeAdapter):
         avg_price = float(resp.get("avgPrice", 0)) if resp.get("avgPrice") else None
         logger.info("合约市价卖出已下: order_id=%s, qty=%s, avg_price=%s", order_id, qty, avg_price)
         # 把均价存到实例上供外部读取
+        self._last_hedge_avg_price = avg_price
+        return order_id
+
+    def place_futures_market_buy(self, symbol_fut: str, qty: float) -> str:
+        self._fut_limiter.wait_if_needed(weight=1)
+        resp = self.futures.new_order(
+            symbol=symbol_fut,
+            side="BUY",
+            type="MARKET",
+            quantity=_fmt_decimal(qty),
+        )
+        order_id = str(resp["orderId"])
+        avg_price = float(resp.get("avgPrice", 0)) if resp.get("avgPrice") else None
+        logger.info("合约市价买入已下: order_id=%s, qty=%s, avg_price=%s", order_id, qty, avg_price)
         self._last_hedge_avg_price = avg_price
         return order_id
 

@@ -63,6 +63,16 @@ def print_resp(resp: dict) -> None:
         print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
         print(f"永续卖出均价: {perp_avg:.6f}" if perp_avg is not None else "永续卖出均价: -")
         print(f"裸露仓位: {resp['naked_exposure']}")
+        close_task = resp.get("close_task") or {}
+        if close_task:
+            close_state = "执行中" if close_task.get("running") else "空闲"
+            print(f"平仓任务: {close_state} | {close_task.get('msg', '-')}")
+            if "target_qty" in close_task:
+                print(
+                    f"平仓进度: 现货已卖 {close_task.get('spot_sold', 0.0):.6f} / "
+                    f"{close_task.get('target_qty', 0.0):.6f} 币, "
+                    f"永续已买 {close_task.get('perp_bought', 0.0):.6f} 币"
+                )
         orders = resp.get("active_orders", [])
         if orders:
             print(f"活跃挂单 ({len(orders)}):")
@@ -88,6 +98,7 @@ _MENU = [
     ("查看预算", "budget", []),
     ("修改预算", None, []),      # 需要额外输入
     ("停止机器人", "stop", []),
+    ("执行平仓", None, []),      # 需要额外输入 symbol + qty
     ("退出", None, []),
 ]
 
@@ -106,7 +117,7 @@ def interactive() -> None:
 
     while True:
         try:
-            line = input("请选择 [1-7]: ").strip()
+            line = input("请选择 [1-8]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -117,17 +128,17 @@ def interactive() -> None:
         try:
             choice = int(line)
         except ValueError:
-            print("请输入数字 1-7")
+            print("请输入数字 1-8")
             continue
 
         if choice < 1 or choice > len(_MENU):
-            print("请输入数字 1-7")
+            print("请输入数字 1-8")
             continue
 
         label, cmd, args = _MENU[choice - 1]
 
         # 退出
-        if choice == 7:
+        if choice == 8:
             break
 
         # 修改预算 —— 需要输入币数量
@@ -140,6 +151,22 @@ def interactive() -> None:
             if not amt:
                 continue
             resp = send_cmd("budget", [amt])
+            print_resp(resp)
+            _print_menu()
+            continue
+
+        # 执行平仓 —— 需要输入币种与数量
+        if choice == 7:
+            try:
+                symbol = input("请输入币种（例如 ASTERUSDT，回车默认当前币种）: ").strip().upper()
+                qty = input("请输入平仓数量（币）: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not qty:
+                continue
+            args = [qty] if not symbol else [symbol, qty]
+            resp = send_cmd("close", args)
             print_resp(resp)
             _print_menu()
             continue
