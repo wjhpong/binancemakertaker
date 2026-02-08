@@ -93,6 +93,23 @@ class BinanceAdapter(ExchangeAdapter):
         self._last_hedge_avg_price: float | None = None
         logger.info("BinanceAdapter 初始化完成 (testnet=%s)", testnet)
 
+    def _resolve_futures_avg_price(self, symbol_fut: str, order_id: str) -> float | None:
+        """测试网有时返回 avgPrice=0，追加查询订单明细兜底拿成交均价。"""
+        for i in range(3):
+            try:
+                resp = self.futures.query_order(symbol=symbol_fut, orderId=order_id)
+                avg_price = float(resp.get("avgPrice", 0) or 0)
+                if avg_price > 0:
+                    return avg_price
+                executed = float(resp.get("executedQty", 0) or 0)
+                cum_quote = float(resp.get("cumQuote", 0) or 0)
+                if executed > 0 and cum_quote > 0:
+                    return cum_quote / executed
+            except Exception:
+                logger.debug("回查合约均价失败: order_id=%s, retry=%d", order_id, i + 1)
+            time.sleep(0.05 * (i + 1))
+        return None
+
     def preflight_check(self, symbol_spot: str, symbol_fut: str) -> dict:
         """启动前校验：确认交易对存在，返回 tick_size / lot_size 供参考。
 
@@ -276,6 +293,8 @@ class BinanceAdapter(ExchangeAdapter):
         order_id = str(resp["orderId"])
         # 尝试获取成交均价
         avg_price = float(resp.get("avgPrice", 0)) if resp.get("avgPrice") else None
+        if not avg_price or avg_price <= 0:
+            avg_price = self._resolve_futures_avg_price(symbol_fut, order_id)
         logger.info("合约市价卖出已下: order_id=%s, qty=%s, avg_price=%s", order_id, qty, avg_price)
         # 把均价存到实例上供外部读取
         self._last_hedge_avg_price = avg_price
@@ -291,6 +310,8 @@ class BinanceAdapter(ExchangeAdapter):
         )
         order_id = str(resp["orderId"])
         avg_price = float(resp.get("avgPrice", 0)) if resp.get("avgPrice") else None
+        if not avg_price or avg_price <= 0:
+            avg_price = self._resolve_futures_avg_price(symbol_fut, order_id)
         logger.info("合约市价买入已下: order_id=%s, qty=%s, avg_price=%s", order_id, qty, avg_price)
         self._last_hedge_avg_price = avg_price
         return order_id
