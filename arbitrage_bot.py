@@ -420,6 +420,16 @@ class SpotFuturesArbitrageBot:
 
                 qty2 = self._floor_to_lot(remaining * self._LEVEL_WEIGHTS[2])
                 qty3 = self._floor_to_lot(remaining - qty2)
+
+                # Notional 下限：确保 price × qty >= 5.5 USDT
+                lot = self.cfg.lot_size
+                min_notional_qty2 = int(5.5 / price2 / lot + 1) * lot if price2 > 0 else 0
+                min_notional_qty3 = int(5.5 / price3 / lot + 1) * lot if price3 > 0 else 0
+                if 0 < qty2 < min_notional_qty2:
+                    qty2 = min_notional_qty2
+                if 0 < qty3 < min_notional_qty3:
+                    qty3 = min_notional_qty3
+
                 if qty2 < self.cfg.min_order_qty and qty3 >= self.cfg.min_order_qty:
                     qty2 = 0.0
                 if qty3 < self.cfg.min_order_qty and qty2 >= self.cfg.min_order_qty:
@@ -588,6 +598,12 @@ class SpotFuturesArbitrageBot:
             qty = min(qty, depth_cap)
 
             qty = int(qty / lot) * lot
+
+            # Notional 下限：确保 price × qty >= 5.5 USDT（Binance 最低 5）
+            min_notional_qty = int(5.5 / bid_price / lot + 1) * lot
+            if qty < min_notional_qty:
+                qty = min_notional_qty
+
             if qty < self.cfg.min_order_qty:
                 logger.info(
                     "[SELECT] 买%d 数量 %.6f 小于最小下单量 %.6f，本轮不挂",
