@@ -57,10 +57,6 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
         # 两次都失败
         return {"ok": False, "msg": "服务启动后仍无法连接，请检查 EC2 上的日志"}
 
-    if result.returncode != 0:
-        err = result.stderr.strip()
-        return {"ok": False, "msg": f"SSH 错误: {err}"}
-
     out = result.stdout.strip()
     if not out:
         return {"ok": False, "msg": "无响应"}
@@ -202,7 +198,7 @@ def interactive() -> None:
         label, cmd, args = _MENU[choice - 1]
 
         # 退出
-        if choice == 8:
+        if choice == len(_MENU):
             break
 
         # 开始挂单 —— 选方向

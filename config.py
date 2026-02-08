@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Tuple
 
@@ -13,6 +12,10 @@ from dotenv import load_dotenv
 from arbitrage_bot import FeeConfig, StrategyConfig
 
 _PROJECT_DIR = Path(__file__).resolve().parent
+
+
+class ConfigError(Exception):
+    """配置加载失败。"""
 
 
 def load_config(
@@ -32,25 +35,21 @@ def load_config(
     testnet = os.environ.get("BINANCE_TESTNET", "true").lower() in ("1", "true", "yes")
 
     if not api_key or not api_secret:
-        print("错误：请在 .env 文件中配置 BINANCE_API_KEY 和 BINANCE_API_SECRET", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigError("请在 .env 文件中配置 BINANCE_API_KEY 和 BINANCE_API_SECRET")
 
     # ── config.yaml ──
     yaml_file = yaml_path or _PROJECT_DIR / "config.yaml"
     if not yaml_file.exists():
-        print(f"错误：找不到配置文件 {yaml_file}", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigError(f"找不到配置文件 {yaml_file}")
 
     try:
         with open(yaml_file, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
     except yaml.YAMLError as e:
-        print(f"错误：config.yaml 解析失败: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigError(f"config.yaml 解析失败: {e}") from e
 
     if not isinstance(raw, dict):
-        print("错误：config.yaml 格式不正确，应为字典结构", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigError("config.yaml 格式不正确，应为字典结构")
 
     # 费率
     fee_raw = raw.get("fee", {})
@@ -72,8 +71,6 @@ def load_config(
         depth_ratio=float(strat_raw.get("depth_ratio", 0.3)),
         min_order_qty=float(strat_raw.get("min_order_qty", 0.00001)),
         lot_size=float(strat_raw.get("lot_size", 0.00001)),
-        min_level=int(strat_raw.get("min_level", 2)),
-        max_level=int(strat_raw.get("max_level", 5)),
         poll_interval_sec=float(strat_raw.get("poll_interval_sec", 0.2)),
         reprice_bps=float(strat_raw.get("reprice_bps", 0.5)),
         max_retry=int(strat_raw.get("max_retry", 3)),

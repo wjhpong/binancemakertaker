@@ -38,8 +38,6 @@ class StrategyConfig:
     depth_ratio: float = 0.3        # 单档不超过该档深度的 30%
     min_order_qty: float = 0.00001
     lot_size: float = 0.00001
-    min_level: int = 2
-    max_level: int = 5
     poll_interval_sec: float = 0.2
     reprice_bps: float = 0.5
     max_retry: int = 3
@@ -679,11 +677,14 @@ class SpotFuturesArbitrageBot:
 
     def _cancel_all_orders(self) -> float:
         """取消全部挂单，返回总未对冲成交量。"""
+        with self._state_lock:
+            levels_to_cancel = list(self._level_to_oid.keys())
         total_unhedged = 0.0
-        for level_idx in list(self._level_to_oid.keys()):
+        for level_idx in levels_to_cancel:
             total_unhedged += self._cancel_level_order(level_idx)
-        self._active_orders.clear()
-        self._level_to_oid.clear()
+        with self._state_lock:
+            self._active_orders.clear()
+            self._level_to_oid.clear()
         return total_unhedged
 
     def _place_level_order(self, level_idx: int, price: float, qty: float) -> Optional[str]:
@@ -881,27 +882,3 @@ class SpotFuturesArbitrageBot:
                 time.sleep(self.cfg.poll_interval_sec * 5)
 
         logger.info("套利机器人已停止")
-
-
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    fee = FeeConfig()
-    cfg = StrategyConfig(
-        symbol_spot="ASTERUSDT",
-        symbol_fut="ASTERUSDT",
-        tick_size_spot=0.001,
-        total_budget=4000.0,
-        min_level=1,
-        max_level=3,
-    )
-
-    adapter = ExchangeAdapter()
-    bot = SpotFuturesArbitrageBot(adapter=adapter, fee=fee, cfg=cfg)
-    bot.run()
-
-
-if __name__ == "__main__":
-    main()

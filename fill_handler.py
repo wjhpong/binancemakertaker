@@ -164,7 +164,8 @@ class FillHandler:
             remaining_hedge = hedged_qty
             for oid in sorted(
                 per_order_unhedged.keys(),
-                key=lambda x: self._active_orders[x].level_idx,
+                key=lambda x: self._active_orders[x].level_idx
+                if x in self._active_orders else 999,
             ):
                 order = self._active_orders.get(oid)
                 if order is None:

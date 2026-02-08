@@ -12,7 +12,7 @@ from dataclasses import replace
 
 from arbitrage_bot import SpotFuturesArbitrageBot
 from binance_adapter import BinanceAdapter
-from config import load_config
+from config import ConfigError, load_config
 from control_server import ControlServer
 from feishu_notifier import FeishuNotifier
 from trade_logger import TradeLogger
@@ -40,7 +40,11 @@ def main() -> None:
             sys.exit(1)
 
     # ── 加载配置 ──
-    api_key, api_secret, testnet, fee, cfg, log_config = load_config()
+    try:
+        api_key, api_secret, testnet, fee, cfg, log_config = load_config()
+    except ConfigError as exc:
+        logger.error("配置加载失败: %s", exc)
+        sys.exit(1)
 
     # 命令行覆盖预算
     if budget_override is not None:
@@ -60,9 +64,8 @@ def main() -> None:
     logger.info("maker费=%.4f%% | taker费=%.4f%% | 最小spread=%.4fbps",
                 fee.spot_maker * 100, fee.fut_taker * 100,
                 fee.min_spread_bps)
-    logger.info("挂单范围: 买%d ~ 买%d | budget=%.6f 币, 单笔<=%s%%预算, <=%s%%档深",
-                cfg.min_level, cfg.max_level, cfg.total_budget,
-                cfg.budget_pct * 100, cfg.depth_ratio * 100)
+    logger.info("挂单范围: 买1~买3 | budget=%.6f 币, 单笔<=%s%%预算, <=%s%%档深",
+                cfg.total_budget, cfg.budget_pct * 100, cfg.depth_ratio * 100)
     logger.info("=" * 60)
 
     # ── 初始化飞书通知器 ──

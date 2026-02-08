@@ -12,8 +12,6 @@ strategy:
   depth_ratio: 0.3          # 单笔不超过该档深度的 30%
   min_order_qty: 1          # 最小下单量 (ASTER) — 合约最小1
   lot_size: 1               # 合约 stepSize=1 (整数)，现货 stepSize=0.01，取大
-  min_level: 1              # 最浅挂单档位（1=买一）
-  max_level: 3              # 最深挂单档位（3=买三）
   poll_interval_sec: 0.2    # 主循环轮询间隔(秒)
   reprice_bps: 5.0          # 改单阈值(基点)，约3档价差才触发改单
   max_retry: 3              # 对冲重试次数
