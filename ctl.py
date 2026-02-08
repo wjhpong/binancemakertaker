@@ -62,6 +62,9 @@ def print_resp(resp: dict) -> None:
         perp_avg = resp.get("perp_avg_price")
         print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
         print(f"永续卖出均价: {perp_avg:.6f}" if perp_avg is not None else "永续卖出均价: -")
+        priced_base = resp.get("perp_avg_priced_base", 0.0)
+        if priced_base > 0:
+            print(f"永续均价覆盖量: {priced_base:.6f} 币")
         print(f"裸露仓位: {resp['naked_exposure']}")
         close_task = resp.get("close_task") or {}
         if close_task:

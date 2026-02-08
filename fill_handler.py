@@ -43,6 +43,7 @@ class FillHandler:
         self.total_filled_usdt: float = 0.0
         self.total_filled_base: float = 0.0
         self.total_hedged_base: float = 0.0
+        self.total_hedged_base_priced: float = 0.0
         self.total_hedged_quote: float = 0.0
         self._last_rest_reconcile_ts: float = 0.0
 
@@ -198,9 +199,9 @@ class FillHandler:
 
     @property
     def perp_avg_price(self) -> float | None:
-        if self.total_hedged_base <= 1e-12 or self.total_hedged_quote <= 1e-12:
+        if self.total_hedged_base_priced <= 1e-12 or self.total_hedged_quote <= 1e-12:
             return None
-        return self.total_hedged_quote / self.total_hedged_base
+        return self.total_hedged_quote / self.total_hedged_base_priced
 
     # ── 对冲执行 ─────────────────────────────────────────────
 
@@ -239,6 +240,7 @@ class FillHandler:
                 self.total_hedged_base += hedge_qty
                 if hedge_price and hedge_price > 0:
                     self.total_hedged_quote += hedge_qty * hedge_price
+                    self.total_hedged_base_priced += hedge_qty
                 self.naked_exposure = residual
                 if residual > 1e-12:
                     logger.warning(
@@ -293,6 +295,7 @@ class FillHandler:
                 self.total_hedged_base += hedge_qty
                 if hedge_price and hedge_price > 0:
                     self.total_hedged_quote += hedge_qty * hedge_price
+                    self.total_hedged_base_priced += hedge_qty
                 self.naked_exposure = max(0.0, self.naked_exposure - hedge_qty)
                 if self.notifier:
                     self.notifier.notify_progress(

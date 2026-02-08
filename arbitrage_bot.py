@@ -284,7 +284,7 @@ class SpotFuturesArbitrageBot:
     def get_status_snapshot(self) -> dict:
         with self._state_lock:
             remaining = self._remaining_budget()
-            return {
+            snap = {
                 "paused": self._paused,
                 "budget": self.cfg.total_budget,
                 "used": round(self._total_filled_base, 6),
@@ -300,11 +300,14 @@ class SpotFuturesArbitrageBot:
                     round(self.perp_avg_price, 6)
                     if self.perp_avg_price is not None else None
                 ),
+                "perp_avg_priced_base": round(self.fh.total_hedged_base_priced, 6),
                 "naked_exposure": round(self.naked_exposure, 4),
                 "close_task": dict(self._close_task_status),
                 "close_pending_hedge": round(self._close_pending_hedge, 6),
-                "active_orders": self.get_active_orders_snapshot(),
             }
+        # active_orders 涉及 REST 调用（推断当前档位），在锁外执行避免阻塞主循环
+        snap["active_orders"] = self.get_active_orders_snapshot()
+        return snap
 
     def _floor_to_lot(self, qty: float) -> float:
         lot = self.cfg.lot_size
@@ -422,9 +425,12 @@ class SpotFuturesArbitrageBot:
                             _update("检测到平仓成交，执行永续买入对冲")
                             hedge_qty = self._floor_to_lot(pending_hedge)
                             if hedge_qty >= self.cfg.lot_size:
-                                self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
-                                perp_bought += hedge_qty
-                                pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                                try:
+                                    self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
+                                    perp_bought += hedge_qty
+                                    pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                                except Exception:
+                                    logger.exception("[CLOSE] 永续买入对冲失败，保留 pending_hedge=%.6f", pending_hedge)
                         if filled >= info["qty"] - 1e-12:
                             open_orders.pop(oid, None)
 
@@ -453,9 +459,12 @@ class SpotFuturesArbitrageBot:
 
                 hedge_qty = self._floor_to_lot(pending_hedge)
                 if hedge_qty >= self.cfg.lot_size:
-                    self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
-                    perp_bought += hedge_qty
-                    pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                    try:
+                        self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
+                        perp_bought += hedge_qty
+                        pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                    except Exception:
+                        logger.exception("[CLOSE] 轮末永续买入对冲失败，保留 pending_hedge=%.6f", pending_hedge)
 
                 _update("本轮平仓完成，检查剩余数量")
                 time.sleep(self.cfg.poll_interval_sec)
