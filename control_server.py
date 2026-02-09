@@ -91,12 +91,8 @@ class ControlServer:
                     if new_budget <= 0:
                         return {"ok": False, "msg": "预算必须 > 0"}
                     bot.set_budget(new_budget)
-                    # 新预算意味着新一轮开仓，清零统计计数（现货/永续保持同口径）
-                    bot.fh.total_filled_base = 0.0
-                    bot.fh.total_filled_usdt = 0.0
-                    bot.fh.total_hedged_base = 0.0
-                    bot.fh.total_hedged_base_priced = 0.0
-                    bot.fh.total_hedged_quote = 0.0
+                    # 新预算意味着新一轮开仓，清零所有统计计数（含 naked_exposure）
+                    bot.fh.reset_counters()
                 except ValueError:
                     return {"ok": False, "msg": "无效数字"}
             if bot.is_paused:
@@ -179,6 +175,18 @@ class ControlServer:
                 }
             except ValueError:
                 return {"ok": False, "msg": "无效数字"}
+
+        elif cmd == "finish_open":
+            summary = bot.finish_open()
+            summary["ok"] = True
+            summary["msg"] = "已终止开仓"
+            return summary
+
+        elif cmd == "finish_close":
+            summary = bot.finish_close()
+            summary["ok"] = True
+            summary["msg"] = "已终止平仓"
+            return summary
 
         elif cmd == "status":
             snap = bot.get_status_snapshot()

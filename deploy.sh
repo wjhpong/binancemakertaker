@@ -32,7 +32,10 @@ scp $SSH_OPTS \
     "$SCRIPT_DIR/ws_manager.py" \
     "$SCRIPT_DIR/config.py" \
     "$SCRIPT_DIR/run.py" \
+    "$SCRIPT_DIR/control_server.py" \
+    "$SCRIPT_DIR/fill_handler.py" \
     "$SCRIPT_DIR/trade_logger.py" \
+    "$SCRIPT_DIR/feishu_notifier.py" \
     "$SCRIPT_DIR/config.yaml" \
     "$SCRIPT_DIR/requirements.txt" \
     "$HOST:$REMOTE_DIR/"
@@ -103,13 +106,7 @@ REMOTE_SCRIPT
 # ── 5. 启动 ──
 echo "[5/5] 启动机器人..."
 ssh $SSH_OPTS "$HOST" << 'REMOTE_SCRIPT'
-# 检查 .env 是否配置了公网 key
 cd /home/ubuntu/arbitrage-bot
-if grep -q "BINANCE_TESTNET=true" .env 2>/dev/null; then
-    echo "⚠️  注意: .env 中 BINANCE_TESTNET=true，当前为测试网模式"
-    echo "    如需切换公网，请修改 .env 后执行: sudo systemctl restart arb-bot"
-fi
-
 sudo systemctl restart arb-bot
 sleep 2
 if sudo systemctl is-active --quiet arb-bot; then

@@ -41,7 +41,7 @@ def main() -> None:
 
     # ── 加载配置 ──
     try:
-        api_key, api_secret, testnet, fee, cfg, log_config = load_config()
+        api_key, api_secret, fee, cfg, log_config = load_config()
     except ConfigError as exc:
         logger.error("配置加载失败: %s", exc)
         sys.exit(1)
@@ -59,8 +59,8 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("同所做市套利机器人启动")
-    logger.info("testnet=%s | symbol_spot=%s | symbol_fut=%s",
-                testnet, cfg.symbol_spot, cfg.symbol_fut)
+    logger.info("symbol_spot=%s | symbol_fut=%s",
+                cfg.symbol_spot, cfg.symbol_fut)
     logger.info("maker费=%.4f%% | taker费=%.4f%% | 最小spread=%.4fbps",
                 fee.spot_maker * 100, fee.fut_taker * 100,
                 fee.min_spread_bps)
@@ -82,7 +82,6 @@ def main() -> None:
 
     ws = WSManager(
         symbol=cfg.symbol_spot,
-        testnet=testnet,
         api_key=api_key,
     )
     ws.start()
@@ -90,7 +89,6 @@ def main() -> None:
     adapter = BinanceAdapter(
         api_key=api_key,
         api_secret=api_secret,
-        testnet=testnet,
         price_cache=ws.price_cache,
     )
 
@@ -100,9 +98,10 @@ def main() -> None:
         real_tick = exchange_info.get("spot_tick_size")
         if real_tick and abs(real_tick - cfg.tick_size_spot) > 1e-12:
             logger.warning(
-                "config.yaml 中 tick_size_spot=%.8f 与交易所实际值 %.8f 不一致，建议修正",
+                "tick_size_spot 从 %.8f 自动修正为交易所实际值 %.8f",
                 cfg.tick_size_spot, real_tick,
             )
+            cfg = replace(cfg, tick_size_spot=real_tick)
         spot_lot = exchange_info.get("spot_lot_size")
         fut_lot = exchange_info.get("fut_lot_size")
         lot_candidates = [x for x in (cfg.lot_size, spot_lot, fut_lot) if x and x > 0]
@@ -124,7 +123,7 @@ def main() -> None:
     )
     bot.notifier = notifier
     if notifier:
-        notifier.notify_start(cfg.symbol_spot, cfg.total_budget, testnet)
+        notifier.notify_start(cfg.symbol_spot, cfg.total_budget)
 
     # ── 信号处理 ──
     def shutdown(signum, _frame):

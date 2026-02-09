@@ -48,6 +48,15 @@ class FillHandler:
         self._last_rest_reconcile_ts: float = 0.0
         self._last_gap_check_ts: float = 0.0
 
+    def reset_counters(self) -> None:
+        """清零所有统计计数器（开启新一轮时调用）。"""
+        self.total_filled_base = 0.0
+        self.total_filled_usdt = 0.0
+        self.total_hedged_base = 0.0
+        self.total_hedged_base_priced = 0.0
+        self.total_hedged_quote = 0.0
+        self.naked_exposure = 0.0
+
     # ── WS 成交事件消费 ──────────────────────────────────────
 
     def drain_fill_queue(self) -> dict[str, float]:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 
 SSH_HOST = "tixian"  # ~/.ssh/config 中定义的 EC2 host
 SOCK_PATH = "/tmp/arb-bot.sock"
@@ -53,7 +54,6 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
                 )
             except subprocess.TimeoutExpired:
                 return {"ok": False, "msg": "启动服务超时，请检查 EC2 状态"}
-            import time
             time.sleep(3)  # 等待 bot 初始化完成、socket 就绪
             continue
         if no_service:
@@ -88,6 +88,8 @@ def print_resp(resp: dict) -> None:
         else:
             direction = "开仓（买入）"
 
+        symbol = resp.get("symbol", "未知")
+        print(f"代币: {symbol}")
         print(f"状态: {state}")
         print(f"当前方向: {direction}")
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
@@ -165,10 +167,12 @@ _MENU = [
     ("开始挂单", None, []),         # 选方向：开仓 / 平仓
     ("暂停", None, []),             # 智能暂停：开仓→暂停开仓，平仓→暂停平仓
     ("恢复", None, []),             # 智能恢复：开仓→恢复开仓，平仓→恢复平仓
-    ("查看预算", "budget", []),
-    ("修改预算", None, []),          # 需要额外输入
+    ("终止", None, []),             # 终止开仓/平仓，推送汇总
+    ("查看数量", "budget", []),
+    ("修改数量", None, []),          # 需要额外输入
     ("停止机器人", "stop", []),
     ("修改Spread", None, []),       # 需要额外输入 bps
+    ("修改代币", None, []),          # 切换交易对
     ("退出", None, []),
 ]
 
@@ -231,8 +235,17 @@ def interactive() -> None:
                 resp = send_cmd("start", start_args)
                 print_resp(resp)
             elif d == "b":
+                # 先查询当前持仓，显示可平仓数量
+                status = send_cmd("status")
+                spot_filled = status.get("spot_filled_base", 0.0)
+                perp_hedged = status.get("perp_hedged_base", 0.0)
+                print(f"  当前持仓: 现货已买入 {spot_filled:.6f} 币, 永续已对冲 {perp_hedged:.6f} 币")
+                if spot_filled <= 0:
+                    print("  ⚠ 当前无持仓，无法平仓")
+                    _print_menu()
+                    continue
                 try:
-                    qty = input("请输入平仓数量（币）: ").strip()
+                    qty = input(f"请输入平仓数量（币，最大 {spot_filled:.6f}）: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
@@ -273,10 +286,70 @@ def interactive() -> None:
             _print_menu()
             continue
 
-        # 修改预算 —— 需要输入币数量
-        if choice == 6:
+        # 终止 —— 先查状态判断方向
+        if choice == 5:
+            status = send_cmd("status")
+            close_task = (status.get("close_task") or {})
+            if close_task.get("running"):
+                # 当前在平仓中
+                try:
+                    confirm = input("确认终止平仓？(y/n): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if confirm != "y":
+                    print("已取消")
+                    _print_menu()
+                    continue
+                resp = send_cmd("finish_close")
+            else:
+                # 当前在开仓中
+                try:
+                    confirm = input("确认终止开仓？(y/n): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if confirm != "y":
+                    print("已取消")
+                    _print_menu()
+                    continue
+                resp = send_cmd("finish_open")
+            if resp.get("ok"):
+                print(f"✅ {resp.get('msg', '已终止')}")
+                # 显示汇总
+                action = resp.get("action", "")
+                symbol = resp.get("symbol", "")
+                if action == "终止开仓":
+                    print(f"  代币: {symbol}")
+                    print(f"  现货买入: {resp.get('spot_filled_base', 0.0):.6f} 币")
+                    print(f"  永续卖出: {resp.get('perp_hedged_base', 0.0):.6f} 币")
+                    spot_avg = resp.get("spot_avg_price")
+                    perp_avg = resp.get("perp_avg_price")
+                    print(f"  现货均价: {spot_avg:.6f}" if spot_avg else "  现货均价: -")
+                    print(f"  永续均价: {perp_avg:.6f}" if perp_avg else "  永续均价: -")
+                    naked = resp.get("naked_exposure", 0.0)
+                    if naked > 1e-12:
+                        print(f"  裸露仓位: {naked:.4f} 币")
+                elif action == "终止平仓":
+                    print(f"  代币: {symbol}")
+                    print(f"  现货卖出: {resp.get('spot_sold', 0.0):.6f} 币")
+                    print(f"  永续买入: {resp.get('perp_bought', 0.0):.6f} 币")
+                    spot_avg = resp.get("spot_avg_price")
+                    perp_avg = resp.get("perp_avg_price")
+                    print(f"  现货均价: {spot_avg:.6f}" if spot_avg else "  现货均价: -")
+                    print(f"  永续均价: {perp_avg:.6f}" if perp_avg else "  永续均价: -")
+                    pending = resp.get("pending_hedge", 0.0)
+                    if pending > 1e-12:
+                        print(f"  待对冲: {pending:.4f} 币")
+            else:
+                print(f"⚠ {resp.get('msg', '终止失败')}")
+            _print_menu()
+            continue
+
+        # 修改数量
+        if choice == 7:
             try:
-                amt = input("请输入新预算（币数量）: ").strip()
+                amt = input("请输入新数量（币数量）: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -288,7 +361,7 @@ def interactive() -> None:
             continue
 
         # 修改 spread(bps)
-        if choice == 8:
+        if choice == 9:
             try:
                 bps = input("请输入最小spread(bps): ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -298,6 +371,73 @@ def interactive() -> None:
                 continue
             resp = send_cmd("spread", [bps])
             print_resp(resp)
+            _print_menu()
+            continue
+
+        # 修改代币
+        if choice == 10:
+            # 读取当前 symbol
+            try:
+                result = subprocess.run(
+                    ["ssh", SSH_HOST, "grep 'symbol_spot' /home/ubuntu/arbitrage-bot/config.yaml"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                current = result.stdout.strip().split(":")[-1].strip() if result.returncode == 0 else "未知"
+            except Exception:
+                current = "未知"
+            print(f"  当前代币: {current}")
+            try:
+                token = input("请输入新代币名称（如 BTC, ETH, ASTER）: ").strip().upper()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not token:
+                _print_menu()
+                continue
+            new_symbol = token if token.endswith("USDT") else token + "USDT"
+            try:
+                confirm = input(f"确认切换到 {new_symbol}？(y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if confirm != "y":
+                print("已取消")
+                _print_menu()
+                continue
+
+            print(f"正在修改配置为 {new_symbol}...")
+            remote_cmd = (
+                f"cd /home/ubuntu/arbitrage-bot && "
+                f"sed -i 's/symbol_spot: .*/symbol_spot: {new_symbol}/' config.yaml && "
+                f"sed -i 's/symbol_fut: .*/symbol_fut: {new_symbol}/' config.yaml && "
+                f"echo OK"
+            )
+            try:
+                result = subprocess.run(
+                    ["ssh", SSH_HOST, remote_cmd],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if "OK" in result.stdout:
+                    print(f"✅ 配置已切换到 {new_symbol}")
+                    # 自动重启服务使新代币生效
+                    print("正在重启机器人服务...")
+                    try:
+                        subprocess.run(
+                            ["ssh", SSH_HOST, "sudo systemctl restart arb-bot"],
+                            capture_output=True, text=True, timeout=15,
+                        )
+                        time.sleep(3)
+                        print("✅ 机器人已重启，新代币已生效")
+                    except subprocess.TimeoutExpired:
+                        print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
+                else:
+                    print(f"⚠ 修改失败")
+                    print(result.stderr)
+            except subprocess.TimeoutExpired:
+                print("⚠ 操作超时，请手动检查 EC2 状态")
+            except Exception as e:
+                print(f"⚠ 操作失败: {e}")
+
             _print_menu()
             continue
 

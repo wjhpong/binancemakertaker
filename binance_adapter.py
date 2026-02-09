@@ -2,18 +2,21 @@
 
 使用官方 SDK:
   - binance-connector (现货)
-  - binance-futures-connector (USDT-M 合约)
+合约通过 Portfolio Margin API (papi) 直接 REST 调用。
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import time
 from collections import deque
 from typing import Optional
+from urllib.parse import urlencode
 
+import requests
 from binance.spot import Spot
-from binance.um_futures import UMFutures
 
 from arbitrage_bot import ExchangeAdapter
 
@@ -21,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Binance API error codes
 _ERR_UNKNOWN_ORDER = -2011  # 订单不存在（已成交或已撤销）
-_ERR_ORDER_NOT_FOUND = -2013  # 订单查询不到（测试网可能清理已完成订单）
+_ERR_ORDER_NOT_FOUND = -2013  # 订单查询不到
+
+_PAPI_BASE = "https://papi.binance.com"
+_FAPI_BASE = "https://fapi.binance.com"
 
 
 class RateLimiter:
@@ -67,37 +73,70 @@ class BinanceAdapter(ExchangeAdapter):
         self,
         api_key: str,
         api_secret: str,
-        testnet: bool = False,
         price_cache=None,
     ) -> None:
-        # ── 现货客户端 ──
-        spot_kwargs: dict = {"api_key": api_key, "api_secret": api_secret}
-        if testnet:
-            spot_kwargs["base_url"] = "https://demo-api.binance.com"
-        self.spot = Spot(**spot_kwargs)
+        self._api_key = api_key
+        self._api_secret = api_secret
 
-        # ── 合约客户端 ──
-        fut_kwargs: dict = {"key": api_key, "secret": api_secret}
-        if testnet:
-            fut_kwargs["base_url"] = "https://demo-fapi.binance.com"
-        self.futures = UMFutures(**fut_kwargs)
+        # ── 现货客户端 ──
+        self.spot = Spot(api_key=api_key, api_secret=api_secret)
 
         # ── 可选的 WS 价格缓存 ──
         self.price_cache = price_cache
 
         # ── 限速器 ──
         self._spot_limiter = RateLimiter(max_weight=1200, window_sec=60)
-        self._fut_limiter = RateLimiter(max_weight=2400, window_sec=60)
+        self._fut_limiter = RateLimiter(max_weight=6000, window_sec=60)
 
-        self._testnet = testnet
         self._last_hedge_avg_price: float | None = None
-        logger.info("BinanceAdapter 初始化完成 (testnet=%s)", testnet)
+        self._session = requests.Session()
+        self._session.headers.update({"X-MBX-APIKEY": api_key})
+        logger.info("BinanceAdapter 初始化完成 (papi 统一账户模式)")
+
+    # ── PAPI 签名与请求 ─────────────────────────────────────
+
+    def _sign(self, params: dict) -> dict:
+        """为请求参数添加 timestamp 和 signature。"""
+        params["timestamp"] = int(time.time() * 1000)
+        query = urlencode(params)
+        signature = hmac.new(
+            self._api_secret.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+        return params
+
+    def _papi_request(self, method: str, path: str, params: dict | None = None) -> dict:
+        """发送签名请求到 papi 端点。"""
+        params = params or {}
+        self._sign(params)
+        url = f"{_PAPI_BASE}{path}"
+        resp = self._session.request(method, url, params=params, timeout=10)
+        data = resp.json()
+        if resp.status_code != 200:
+            code = data.get("code", resp.status_code)
+            msg = data.get("msg", "unknown error")
+            raise Exception(f"({resp.status_code}, {code}, '{msg}')")
+        return data
+
+    def _fapi_get(self, path: str, params: dict | None = None) -> dict:
+        """fapi 公开行情接口（无需签名）。"""
+        url = f"{_FAPI_BASE}{path}"
+        resp = self._session.get(url, params=params or {}, timeout=10)
+        data = resp.json()
+        if resp.status_code != 200:
+            raise Exception(f"fapi 请求失败: {resp.status_code} {data}")
+        return data
+
+    # ── 合约均价兜底 ─────────────────────────────────────────
 
     def _resolve_futures_avg_price(self, symbol_fut: str, order_id: str) -> float | None:
-        """测试网有时返回 avgPrice=0，追加查询订单明细兜底拿成交均价。"""
+        """avgPrice=0 时追加查询订单明细兜底拿成交均价。"""
         for i in range(3):
             try:
-                resp = self.futures.query_order(symbol=symbol_fut, orderId=order_id)
+                resp = self._papi_request("GET", "/papi/v1/um/order", {
+                    "symbol": symbol_fut,
+                    "orderId": order_id,
+                })
                 avg_price = float(resp.get("avgPrice", 0) or 0)
                 if avg_price > 0:
                     return avg_price
@@ -139,9 +178,9 @@ class BinanceAdapter(ExchangeAdapter):
         except Exception:
             logger.exception("获取现货 exchangeInfo 失败")
 
-        # 合约 exchangeInfo
+        # 合约 exchangeInfo（fapi 公开接口仍可用于行情数据）
         try:
-            info = self.futures.exchange_info()
+            info = self._fapi_get("/fapi/v1/exchangeInfo")
             for sym in info.get("symbols", []):
                 if sym["symbol"] == symbol_fut:
                     for f in sym.get("filters", []):
@@ -172,7 +211,7 @@ class BinanceAdapter(ExchangeAdapter):
             logger.debug("WS 价格缓存过期或为空，回退到 REST")
 
         self._fut_limiter.wait_if_needed(weight=2)
-        resp = self.futures.book_ticker(symbol=symbol_fut)
+        resp = self._fapi_get("/fapi/v1/ticker/bookTicker", {"symbol": symbol_fut})
         return float(resp["bidPrice"])
 
     def get_futures_best_ask(self, symbol_fut: str) -> float:
@@ -183,7 +222,7 @@ class BinanceAdapter(ExchangeAdapter):
             logger.debug("WS 价格缓存过期或为空，回退到 REST")
 
         self._fut_limiter.wait_if_needed(weight=2)
-        resp = self.futures.book_ticker(symbol=symbol_fut)
+        resp = self._fapi_get("/fapi/v1/ticker/bookTicker", {"symbol": symbol_fut})
         return float(resp["askPrice"])
 
     def get_spot_depth(self, symbol_spot: str, levels: int = 5) -> list[tuple[float, float]]:
@@ -284,12 +323,12 @@ class BinanceAdapter(ExchangeAdapter):
 
     def place_futures_market_sell(self, symbol_fut: str, qty: float) -> str:
         self._fut_limiter.wait_if_needed(weight=1)
-        resp = self.futures.new_order(
-            symbol=symbol_fut,
-            side="SELL",
-            type="MARKET",
-            quantity=_fmt_decimal(qty),
-        )
+        resp = self._papi_request("POST", "/papi/v1/um/order", {
+            "symbol": symbol_fut,
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": _fmt_decimal(qty),
+        })
         order_id = str(resp["orderId"])
         # 尝试获取成交均价
         avg_price = float(resp.get("avgPrice", 0)) if resp.get("avgPrice") else None
@@ -302,12 +341,12 @@ class BinanceAdapter(ExchangeAdapter):
 
     def place_futures_market_buy(self, symbol_fut: str, qty: float) -> str:
         self._fut_limiter.wait_if_needed(weight=1)
-        resp = self.futures.new_order(
-            symbol=symbol_fut,
-            side="BUY",
-            type="MARKET",
-            quantity=_fmt_decimal(qty),
-        )
+        resp = self._papi_request("POST", "/papi/v1/um/order", {
+            "symbol": symbol_fut,
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": _fmt_decimal(qty),
+        })
         order_id = str(resp["orderId"])
         avg_price = float(resp.get("avgPrice", 0)) if resp.get("avgPrice") else None
         if not avg_price or avg_price <= 0:

@@ -119,6 +119,7 @@ class SpotFuturesArbitrageBot:
         self._close_task_paused: bool = False
         self._close_task_stop_requested: bool = False
         self._close_task_status: dict = {"running": False}
+        self._close_task_thread: Optional[threading.Thread] = None
         self._close_pending_hedge: float = 0.0
         # 飞书通知器（可选）
         self._notifier = None
@@ -232,37 +233,56 @@ class SpotFuturesArbitrageBot:
         if self.notifier:
             self.notifier.notify_finish(summary)
 
-        # 4. 仅在确认无风险仓位时才清零计数，避免掩盖风险
-        if self.naked_exposure <= 1e-12:
-            self.fh.total_filled_base = 0.0
-            self.fh.total_filled_usdt = 0.0
-            self.fh.total_hedged_base = 0.0
-            self.fh.total_hedged_base_priced = 0.0
-            self.fh.total_hedged_quote = 0.0
-            logger.info("[CMD] 终止开仓后已清零统计（无裸露仓位）")
-        else:
+        # 4. 清零计数器，为下一轮做准备
+        #    碎片量（< lot_size）无法对冲，直接忽略并清零；
+        #    只有 >= lot_size 说明对冲真的失败了，才保留警告。
+        if self.naked_exposure >= self.cfg.lot_size:
             logger.warning(
-                "[CMD] 终止开仓后保留统计（存在裸露仓位 %.8f），避免风险被掩盖",
+                "[CMD] 终止开仓后存在较大裸露仓位 %.8f（>= lot_size），"
+                "仍清零计数器但保留裸露仓位等待恢复",
                 self.naked_exposure,
             )
+            # 保留 naked_exposure 让主循环继续尝试对冲，但计数器清零
+            saved_naked = self.naked_exposure
+            self.fh.reset_counters()
+            self.fh.naked_exposure = saved_naked
+        else:
+            if self.naked_exposure > 1e-12:
+                logger.info(
+                    "[CMD] 终止开仓后忽略碎片裸露仓位 %.8f（< lot_size）",
+                    self.naked_exposure,
+                )
+            self.fh.reset_counters()
 
         logger.info("[CMD] 终止开仓完成: %s", summary)
         return summary
 
     def finish_close(self) -> dict:
-        """终止平仓：停止平仓任务，推送汇总。"""
+        """终止平仓：通知平仓线程停止，等待退出，推送汇总，清零计数器。"""
         logger.info("[CMD] 终止平仓")
 
-        # 1. 停止平仓任务
+        # 1. 只设 stop_requested，让平仓线程自己退出
+        #    不直接设 _close_task_running=False，避免新旧线程并存
         with self._close_task_lock:
+            was_running = self._close_task_running
             self._close_task_stop_requested = True
-            close_status = dict(self._close_task_status)
-            self._close_task_running = False
-            self._close_task_paused = False
-            self._close_task_status["running"] = False
-            self._close_task_status["msg"] = "已收到终止指令，等待任务退出"
+            self._close_task_paused = False          # 取消暂停以加速退出
 
-        # 2. 收集汇总信息
+        # 2. 等待平仓线程退出（最多 20 秒）
+        th = self._close_task_thread
+        if was_running and th is not None and th.is_alive():
+            logger.info("[CMD] 等待平仓线程退出...")
+            th.join(timeout=20)
+            if th.is_alive():
+                logger.warning("[CMD] 平仓线程未在 20 秒内退出，强制继续")
+
+        # 3. 线程已退出，收集最终状态（线程退出时已更新 _close_task_status）
+        with self._close_task_lock:
+            close_status = dict(self._close_task_status)
+            # 确保标记为已停止
+            self._close_task_running = False
+            self._close_task_stop_requested = False
+
         summary = {
             "action": "终止平仓",
             "symbol": self.cfg.symbol_spot,
@@ -279,24 +299,22 @@ class SpotFuturesArbitrageBot:
             "pending_hedge": round(close_status.get("pending_hedge", 0.0), 6),
         }
 
-        # 3. 飞书推送
+        # 4. 飞书推送
         if self.notifier:
             self.notifier.notify_finish(summary)
 
-        # 4. 仅在确认无风险仓位时才清零计数，避免掩盖风险
-        if self.naked_exposure <= 1e-12 and summary.get("pending_hedge", 0.0) <= 1e-12:
-            self.fh.total_filled_base = 0.0
-            self.fh.total_filled_usdt = 0.0
-            self.fh.total_hedged_base = 0.0
-            self.fh.total_hedged_base_priced = 0.0
-            self.fh.total_hedged_quote = 0.0
-            logger.info("[CMD] 终止平仓后已清零统计（无裸露仓位/待对冲）")
-        else:
+        # 5. 清零计数器（与 finish_open 一致的逻辑）
+        if self.naked_exposure >= self.cfg.lot_size:
             logger.warning(
-                "[CMD] 终止平仓后保留统计（naked=%.8f, pending=%.8f）避免风险被掩盖",
+                "[CMD] 终止平仓后存在较大裸露仓位 %.8f（>= lot_size），"
+                "仍清零计数器但保留裸露仓位等待恢复",
                 self.naked_exposure,
-                float(summary.get("pending_hedge", 0.0) or 0.0),
             )
+            saved_naked = self.naked_exposure
+            self.fh.reset_counters()
+            self.fh.naked_exposure = saved_naked
+        else:
+            self.fh.reset_counters()
 
         logger.info("[CMD] 终止平仓完成: %s", summary)
         return summary
@@ -454,6 +472,7 @@ class SpotFuturesArbitrageBot:
             daemon=True,
             name="close-task",
         )
+        self._close_task_thread = th
         th.start()
         return True, f"已启动平仓任务: {symbol} {qty:.6f} 币"
 
@@ -606,6 +625,10 @@ class SpotFuturesArbitrageBot:
                 while open_orders and (time.time() - started) < max_wait_sec:
                     if _should_stop():
                         _update("收到终止指令，撤销当前平仓挂单", open_orders)
+                        break
+                    # 暂停时立刻跳出，外面的撤单循环会撤掉卖单
+                    if self._close_task_paused:
+                        _update("平仓暂停，撤销当前卖单", open_orders)
                         break
                     asks_now = self.adapter.get_spot_asks(symbol, levels=5)
                     ask5 = asks_now[4][0] if len(asks_now) >= 5 else None

@@ -21,9 +21,9 @@ class ConfigError(Exception):
 def load_config(
     env_path: Path | None = None,
     yaml_path: Path | None = None,
-) -> Tuple[str, str, bool, FeeConfig, StrategyConfig, dict]:
+) -> Tuple[str, str, FeeConfig, StrategyConfig, dict]:
     """
-    返回 (api_key, api_secret, testnet, fee_config, strategy_config, log_config)
+    返回 (api_key, api_secret, fee_config, strategy_config, log_config)
     """
     # ── .env ──
     env_file = env_path or _PROJECT_DIR / ".env"
@@ -32,7 +32,6 @@ def load_config(
 
     api_key = os.environ.get("BINANCE_API_KEY", "")
     api_secret = os.environ.get("BINANCE_API_SECRET", "")
-    testnet = os.environ.get("BINANCE_TESTNET", "true").lower() in ("1", "true", "yes")
 
     if not api_key or not api_secret:
         raise ConfigError("请在 .env 文件中配置 BINANCE_API_KEY 和 BINANCE_API_SECRET")
@@ -83,4 +82,4 @@ def load_config(
         "file": log_raw.get("file", "arbitrage.log"),
     }
 
-    return api_key, api_secret, testnet, fee, cfg, log_config
+    return api_key, api_secret, fee, cfg, log_config

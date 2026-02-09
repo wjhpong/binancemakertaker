@@ -100,22 +100,14 @@ class WSManager:
     _SPOT_REST = "https://api.binance.com"
     _SPOT_WS_BASE = "wss://stream.binance.com:9443/ws/"
 
-    # ── 模拟盘 (Demo Trading) endpoint ──
-    _SPOT_DEPTH_WS_TESTNET = "wss://demo-stream.binance.com/ws/{symbol}@depth5@100ms"
-    _FUT_WS_TESTNET = "wss://fstream.binancefuture.com/ws/{symbol}@bookTicker"
-    _SPOT_REST_TESTNET = "https://demo-api.binance.com"
-    _SPOT_WS_BASE_TESTNET = "wss://demo-stream.binance.com/ws/"
-
     def __init__(
         self,
         symbol: str,
-        testnet: bool = False,
         api_key: str = "",
         on_order_update: Callable[[dict], None] | None = None,
     ) -> None:
         self.symbol = symbol.lower()
         self.price_cache = PriceCache()
-        self._testnet = testnet
         self._api_key = api_key
         self._on_order_update = on_order_update
         self.fill_queue: queue.Queue[dict] = queue.Queue()
@@ -152,8 +144,8 @@ class WSManager:
             t_user.start()
             self._threads.append(t_user)
 
-        logger.info("WebSocket 已启动: symbol=%s (spot=depth5, fut=bookTicker), testnet=%s, user_stream=%s",
-                     self.symbol, self._testnet, bool(self._api_key))
+        logger.info("WebSocket 已启动: symbol=%s (spot=depth5, fut=bookTicker), user_stream=%s",
+                     self.symbol, bool(self._api_key))
 
     def stop(self) -> None:
         self._running = False
@@ -162,12 +154,10 @@ class WSManager:
     # ── URL 构建 ──
 
     def _build_spot_depth_url(self) -> str:
-        tpl = self._SPOT_DEPTH_WS_TESTNET if self._testnet else self._SPOT_DEPTH_WS
-        return tpl.format(symbol=self.symbol)
+        return self._SPOT_DEPTH_WS.format(symbol=self.symbol)
 
     def _build_futures_url(self) -> str:
-        tpl = self._FUT_WS_TESTNET if self._testnet else self._FUT_WS
-        return tpl.format(symbol=self.symbol)
+        return self._FUT_WS.format(symbol=self.symbol)
 
     # ── WS 循环（自动重连）──
 
@@ -217,10 +207,10 @@ class WSManager:
     # ── 用户数据流 ──
 
     def _get_rest_base(self) -> str:
-        return self._SPOT_REST_TESTNET if self._testnet else self._SPOT_REST
+        return self._SPOT_REST
 
     def _get_ws_base(self) -> str:
-        return self._SPOT_WS_BASE_TESTNET if self._testnet else self._SPOT_WS_BASE
+        return self._SPOT_WS_BASE
 
     def _create_listen_key(self) -> str:
         """创建 listenKey 用于用户数据流。"""

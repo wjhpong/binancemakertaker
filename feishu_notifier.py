@@ -42,11 +42,9 @@ class FeishuNotifier:
         payload = {"msg_type": "text", "content": {"text": text}}
         return self._post(payload)
 
-    def notify_start(self, symbol: str, budget_base: float, testnet: bool) -> None:
-        env = "Testnet" if testnet else "Mainnet"
+    def notify_start(self, symbol: str, budget_base: float) -> None:
         text = (
             f"[机器人启动] {symbol}\n"
-            f"环境: {env}\n"
             f"预算: {budget_base:.4f} 币"
         )
         threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
@@ -71,4 +69,43 @@ class FeishuNotifier:
             f"现货累计成交: {total_spot_filled_base:.4f} 币\n"
             f"永续累计对冲: {total_perp_hedged_base:.4f} 币"
         )
+        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
+
+    def notify_finish(self, summary: dict) -> None:
+        """终止时推送汇总信息（开仓终止或平仓终止）。"""
+        action = summary.get("action", "终止")
+        symbol = summary.get("symbol", "")
+        spot_avg = summary.get("spot_avg_price")
+        perp_avg = summary.get("perp_avg_price")
+        spot_avg_str = f"{spot_avg:.6f}" if spot_avg else "-"
+        perp_avg_str = f"{perp_avg:.6f}" if perp_avg else "-"
+
+        if action == "终止开仓":
+            spot_qty = summary.get("spot_filled_base", 0.0)
+            perp_qty = summary.get("perp_hedged_base", 0.0)
+            naked = summary.get("naked_exposure", 0.0)
+            lines = [
+                f"[终止开仓] {symbol}",
+                f"现货买入: {spot_qty:.4f} 币",
+                f"永续卖出: {perp_qty:.4f} 币",
+                f"现货均价: {spot_avg_str}",
+                f"永续均价: {perp_avg_str}",
+            ]
+            if naked > 1e-12:
+                lines.append(f"裸露仓位: {naked:.4f} 币")
+        else:
+            spot_qty = summary.get("spot_sold", 0.0)
+            perp_qty = summary.get("perp_bought", 0.0)
+            pending = summary.get("pending_hedge", 0.0)
+            lines = [
+                f"[终止平仓] {symbol}",
+                f"现货卖出: {spot_qty:.4f} 币",
+                f"永续买入: {perp_qty:.4f} 币",
+                f"现货均价: {spot_avg_str}",
+                f"永续均价: {perp_avg_str}",
+            ]
+            if pending > 1e-12:
+                lines.append(f"待对冲: {pending:.4f} 币")
+
+        text = "\n".join(lines)
         threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
