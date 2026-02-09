@@ -81,10 +81,13 @@ def print_resp(resp: dict) -> None:
         state = "暂停" if resp["paused"] else "运行中"
         close_task = resp.get("close_task") or {}
         close_running = close_task.get("running", False)
+        close_has_record = close_task.get("target_qty", 0.0) > 1e-12
 
         # 判断当前方向
-        if close_running:
+        if close_running or close_has_record:
             direction = "平仓（卖出）"
+            if not close_running:
+                state = "平仓已结束"
         elif resp["paused"] and resp.get("spot_filled_base", 0.0) < 1e-12:
             direction = "待命"
         else:
@@ -96,7 +99,7 @@ def print_resp(resp: dict) -> None:
         print(f"当前方向: {direction}")
 
         # 根据方向显示进度
-        if close_running:
+        if close_running or close_has_record:
             # 平仓模式
             close_paused = close_task.get("paused", False)
             if close_paused:
@@ -147,7 +150,7 @@ def print_resp(resp: dict) -> None:
 
         # 通用信息
         print(f"最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
-        if close_running:
+        if close_running or close_has_record:
             # 平仓模式：显示卖出均价和买入均价
             spot_avg = close_task.get("spot_sell_avg_price")
             perp_avg = close_task.get("perp_buy_avg_price")
@@ -352,8 +355,15 @@ def interactive() -> None:
             close_task = (status.get("close_task") or {})
             is_paused = status.get("paused", False)
             spot_filled = status.get("spot_filled_base", 0.0)
-            if close_task.get("running"):
-                # 当前在平仓中
+            # 判断是否处于平仓（正在执行 或 刚结束但有记录）
+            close_running = close_task.get("running", False)
+            close_has_record = close_task.get("target_qty", 0.0) > 1e-12
+            if close_running or close_has_record:
+                # 平仓中或刚结束平仓
+                sold = close_task.get("spot_sold", 0.0)
+                target = close_task.get("target_qty", 0.0)
+                state_str = "进行中" if close_running else "已结束"
+                print(f"  平仓状态: {state_str}，已卖出 {sold:.6f} / {target:.6f} 币")
                 try:
                     confirm = input("确认终止平仓？(y/n): ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
@@ -371,6 +381,7 @@ def interactive() -> None:
                 continue
             else:
                 # 当前在开仓中
+                print(f"  开仓进度: 已买入 {spot_filled:.6f} 币")
                 try:
                     confirm = input("确认终止开仓？(y/n): ").strip().lower()
                 except (EOFError, KeyboardInterrupt):

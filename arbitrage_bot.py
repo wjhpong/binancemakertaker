@@ -258,6 +258,10 @@ class SpotFuturesArbitrageBot:
                 )
             self.fh.reset_counters()
 
+        # 5. 清空平仓任务状态，确保不会误判方向
+        with self._close_task_lock:
+            self._close_task_status = {"running": False}
+
         logger.info("[CMD] 终止开仓完成: %s", summary)
         return summary
 
@@ -319,6 +323,10 @@ class SpotFuturesArbitrageBot:
             self.fh.naked_exposure = saved_naked
         else:
             self.fh.reset_counters()
+
+        # 6. 清空平仓任务状态，避免后续误判为平仓模式
+        with self._close_task_lock:
+            self._close_task_status = {"running": False}
 
         logger.info("[CMD] 终止平仓完成: %s", summary)
         return summary
