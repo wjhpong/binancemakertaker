@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -116,6 +117,7 @@ class SpotFuturesArbitrageBot:
         self._close_task_lock = threading.Lock()
         self._close_task_running: bool = False
         self._close_task_paused: bool = False
+        self._close_task_stop_requested: bool = False
         self._close_task_status: dict = {"running": False}
         self._close_pending_hedge: float = 0.0
         # 飞书通知器（可选）
@@ -197,6 +199,107 @@ class SpotFuturesArbitrageBot:
         logger.info("[CMD] 恢复挂单")
         if self.notifier:
             self.notifier.notify_resume(self.cfg.symbol_spot)
+
+    def finish_open(self) -> dict:
+        """终止开仓：撤销全部买单，暂停机器人，推送汇总。"""
+        # 1. 暂停 + 撤掉所有买单
+        with self._state_lock:
+            self._paused = True
+        logger.info("[CMD] 终止开仓")
+
+        unhedged = self._cancel_all_orders()
+        if unhedged > 1e-12:
+            self.fh.try_hedge(unhedged)
+
+        # 2. 收集汇总信息
+        summary = {
+            "action": "终止开仓",
+            "symbol": self.cfg.symbol_spot,
+            "spot_filled_base": round(self._total_filled_base, 6),
+            "perp_hedged_base": round(self.total_hedged_base, 6),
+            "spot_avg_price": (
+                round(self.spot_avg_price, 6)
+                if self.spot_avg_price is not None else None
+            ),
+            "perp_avg_price": (
+                round(self.perp_avg_price, 6)
+                if self.perp_avg_price is not None else None
+            ),
+            "naked_exposure": round(self.naked_exposure, 4),
+        }
+
+        # 3. 飞书推送
+        if self.notifier:
+            self.notifier.notify_finish(summary)
+
+        # 4. 仅在确认无风险仓位时才清零计数，避免掩盖风险
+        if self.naked_exposure <= 1e-12:
+            self.fh.total_filled_base = 0.0
+            self.fh.total_filled_usdt = 0.0
+            self.fh.total_hedged_base = 0.0
+            self.fh.total_hedged_base_priced = 0.0
+            self.fh.total_hedged_quote = 0.0
+            logger.info("[CMD] 终止开仓后已清零统计（无裸露仓位）")
+        else:
+            logger.warning(
+                "[CMD] 终止开仓后保留统计（存在裸露仓位 %.8f），避免风险被掩盖",
+                self.naked_exposure,
+            )
+
+        logger.info("[CMD] 终止开仓完成: %s", summary)
+        return summary
+
+    def finish_close(self) -> dict:
+        """终止平仓：停止平仓任务，推送汇总。"""
+        logger.info("[CMD] 终止平仓")
+
+        # 1. 停止平仓任务
+        with self._close_task_lock:
+            self._close_task_stop_requested = True
+            close_status = dict(self._close_task_status)
+            self._close_task_running = False
+            self._close_task_paused = False
+            self._close_task_status["running"] = False
+            self._close_task_status["msg"] = "已收到终止指令，等待任务退出"
+
+        # 2. 收集汇总信息
+        summary = {
+            "action": "终止平仓",
+            "symbol": self.cfg.symbol_spot,
+            "spot_sold": round(close_status.get("spot_sold", 0.0), 6),
+            "perp_bought": round(close_status.get("perp_bought", 0.0), 6),
+            "spot_avg_price": (
+                round(self.spot_avg_price, 6)
+                if self.spot_avg_price is not None else None
+            ),
+            "perp_avg_price": (
+                round(self.perp_avg_price, 6)
+                if self.perp_avg_price is not None else None
+            ),
+            "pending_hedge": round(close_status.get("pending_hedge", 0.0), 6),
+        }
+
+        # 3. 飞书推送
+        if self.notifier:
+            self.notifier.notify_finish(summary)
+
+        # 4. 仅在确认无风险仓位时才清零计数，避免掩盖风险
+        if self.naked_exposure <= 1e-12 and summary.get("pending_hedge", 0.0) <= 1e-12:
+            self.fh.total_filled_base = 0.0
+            self.fh.total_filled_usdt = 0.0
+            self.fh.total_hedged_base = 0.0
+            self.fh.total_hedged_base_priced = 0.0
+            self.fh.total_hedged_quote = 0.0
+            logger.info("[CMD] 终止平仓后已清零统计（无裸露仓位/待对冲）")
+        else:
+            logger.warning(
+                "[CMD] 终止平仓后保留统计（naked=%.8f, pending=%.8f）避免风险被掩盖",
+                self.naked_exposure,
+                float(summary.get("pending_hedge", 0.0) or 0.0),
+            )
+
+        logger.info("[CMD] 终止平仓完成: %s", summary)
+        return summary
 
     @property
     def is_paused(self) -> bool:
@@ -291,6 +394,7 @@ class SpotFuturesArbitrageBot:
         with self._state_lock:
             remaining = self._remaining_budget()
             snap = {
+                "symbol": self.cfg.symbol_spot,
                 "paused": self._paused,
                 "budget": self.cfg.total_budget,
                 "used": round(self._total_filled_base, 6),
@@ -332,6 +436,8 @@ class SpotFuturesArbitrageBot:
             if self._close_task_running:
                 return False, "已有平仓任务在执行"
             self._close_task_running = True
+            self._close_task_stop_requested = False
+            self._close_task_paused = False
             self._close_task_status = {
                 "running": True,
                 "symbol": symbol,
@@ -405,6 +511,10 @@ class SpotFuturesArbitrageBot:
                     }
                 )
 
+        def _should_stop() -> bool:
+            with self._close_task_lock:
+                return self._close_task_stop_requested or (not self._close_task_running)
+
         try:
             self.pause()
             time.sleep(self.cfg.poll_interval_sec * 2)
@@ -420,12 +530,18 @@ class SpotFuturesArbitrageBot:
             _update("已暂停开仓并撤销买单，开始执行平仓", {})
 
             for _ in range(max_rounds):
+                if _should_stop():
+                    _update("收到终止指令，停止平仓", {})
+                    break
+
                 # 暂停检测：撤掉卖单后等待恢复
                 if self._close_task_paused:
                     _update("平仓已暂停，等待恢复指令", {})
                     while self._close_task_paused and self._close_task_running:
+                        if _should_stop():
+                            break
                         time.sleep(self.cfg.poll_interval_sec)
-                    if not self._close_task_running:
+                    if _should_stop():
                         break
                     _update("平仓已恢复", {})
 
@@ -488,6 +604,9 @@ class SpotFuturesArbitrageBot:
 
                 started = time.time()
                 while open_orders and (time.time() - started) < max_wait_sec:
+                    if _should_stop():
+                        _update("收到终止指令，撤销当前平仓挂单", open_orders)
+                        break
                     asks_now = self.adapter.get_spot_asks(symbol, levels=5)
                     ask5 = asks_now[4][0] if len(asks_now) >= 5 else None
                     drift = False
@@ -566,6 +685,8 @@ class SpotFuturesArbitrageBot:
                     "msg": msg,
                 }
                 self._close_task_running = False
+                self._close_task_stop_requested = False
+                self._close_task_paused = False
         except Exception as exc:
             logger.exception("[CLOSE] 平仓任务失败")
             with self._close_task_lock:
@@ -585,6 +706,8 @@ class SpotFuturesArbitrageBot:
                     "msg": f"失败: {exc}",
                 }
                 self._close_task_running = False
+                self._close_task_stop_requested = False
+                self._close_task_paused = False
 
     # ── 多档选档 + 深度加权分配 ───────────────────────────────
 
@@ -613,8 +736,10 @@ class SpotFuturesArbitrageBot:
             return []
         cycle_budget = min(self.cfg.total_budget * self.cfg.budget_pct, remaining)
         lot = self.cfg.lot_size
+        if cycle_budget < lot:
+            return []
 
-        results: list[tuple[int, float, float]] = []
+        plan: list[dict] = []
         for level_idx, weight in self._LEVEL_WEIGHTS.items():
             if level_idx > len(spot_bids):
                 logger.info("[SELECT] 盘口深度不足，缺少买%d，跳过本轮", level_idx)
@@ -631,30 +756,75 @@ class SpotFuturesArbitrageBot:
                 )
                 return []
 
-            qty = cycle_budget * weight
-
-            # 深度上限约束
-            depth_cap = level_qty * self.cfg.depth_ratio
-            qty = min(qty, depth_cap)
-
-            qty = int(qty / lot) * lot
+            desired_qty = int((cycle_budget * weight) / lot) * lot
+            depth_cap = int((level_qty * self.cfg.depth_ratio) / lot) * lot
+            if depth_cap < self.cfg.min_order_qty:
+                logger.info(
+                    "[SELECT] 买%d 深度可下数量 %.6f 小于最小下单量 %.6f，本轮不挂",
+                    level_idx, depth_cap, self.cfg.min_order_qty,
+                )
+                return []
 
             # Notional 下限：确保 price × qty >= 5.5 USDT（Binance 最低 5）
-            min_notional_qty = int(5.5 / bid_price / lot + 1) * lot
+            min_notional_qty = math.ceil((5.5 / bid_price) / lot) * lot
+            if min_notional_qty > depth_cap + 1e-12:
+                logger.info(
+                    "[SELECT] 买%d 最小名义量 %.6f 超过深度上限 %.6f，本轮不挂",
+                    level_idx, min_notional_qty, depth_cap,
+                )
+                return []
+
+            qty = min(depth_cap, desired_qty)
             if qty < min_notional_qty:
                 qty = min_notional_qty
 
+            plan.append(
+                {
+                    "level_idx": level_idx,
+                    "price": bid_price,
+                    "qty": qty,
+                    "min_qty": min_notional_qty,
+                }
+            )
+
+        total_qty = sum(float(p["qty"]) for p in plan)
+        # 保证总量不超过本轮预算（防止最小名义金额抬量后超预算）
+        if total_qty > cycle_budget + 1e-12:
+            overflow = total_qty - cycle_budget
+            for p in sorted(plan, key=lambda x: int(x["level_idx"]), reverse=True):
+                if overflow <= 1e-12:
+                    break
+                reducible = max(0.0, float(p["qty"]) - float(p["min_qty"]))
+                if reducible <= 1e-12:
+                    continue
+                cut = min(reducible, math.floor(overflow / lot) * lot)
+                if cut <= 1e-12:
+                    continue
+                p["qty"] = float(p["qty"]) - cut
+                overflow -= cut
+
+            if overflow > 1e-12:
+                logger.info(
+                    "[SELECT] 最小名义金额约束导致本轮最小总量 %.6f 超预算 %.6f，本轮不挂",
+                    total_qty, cycle_budget,
+                )
+                return []
+
+        results: list[tuple[int, float, float]] = []
+        for p in plan:
+            level_idx = int(p["level_idx"])
+            bid_price = float(p["price"])
+            qty = float(p["qty"])
             if qty < self.cfg.min_order_qty:
                 logger.info(
                     "[SELECT] 买%d 数量 %.6f 小于最小下单量 %.6f，本轮不挂",
                     level_idx, qty, self.cfg.min_order_qty,
                 )
                 return []
-
             results.append((level_idx, bid_price, qty))
             logger.debug(
                 "[SELECT] 买%d: price=%.4f, weight=%d%%, qty=%.2f",
-                level_idx, bid_price, int(weight * 100), qty,
+                level_idx, bid_price, int(self._LEVEL_WEIGHTS[level_idx] * 100), qty,
             )
 
         return results
