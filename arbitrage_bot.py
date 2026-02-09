@@ -283,6 +283,19 @@ class SpotFuturesArbitrageBot:
             th.join(timeout=20)
             if th.is_alive():
                 logger.warning("[CMD] 平仓线程未在 20 秒内退出，强制继续")
+                with self._close_task_lock:
+                    close_status = dict(self._close_task_status)
+                return {
+                    "action": "终止平仓",
+                    "symbol": self.cfg.symbol_spot,
+                    "spot_sold": round(close_status.get("spot_sold", 0.0), 6),
+                    "perp_bought": round(close_status.get("perp_bought", 0.0), 6),
+                    "spot_avg_price": close_status.get("spot_sell_avg_price"),
+                    "perp_avg_price": close_status.get("perp_buy_avg_price"),
+                    "pending_hedge": round(close_status.get("pending_hedge", 0.0), 6),
+                    "msg": "终止指令已发送，平仓线程仍在退出中",
+                    "stop_pending": True,
+                }
 
         # 3. 线程已退出，收集最终状态（线程退出时已更新 _close_task_status）
         with self._close_task_lock:
@@ -296,14 +309,8 @@ class SpotFuturesArbitrageBot:
             "symbol": self.cfg.symbol_spot,
             "spot_sold": round(close_status.get("spot_sold", 0.0), 6),
             "perp_bought": round(close_status.get("perp_bought", 0.0), 6),
-            "spot_avg_price": (
-                round(self.spot_avg_price, 6)
-                if self.spot_avg_price is not None else None
-            ),
-            "perp_avg_price": (
-                round(self.perp_avg_price, 6)
-                if self.perp_avg_price is not None else None
-            ),
+            "spot_avg_price": close_status.get("spot_sell_avg_price"),
+            "perp_avg_price": close_status.get("perp_buy_avg_price"),
             "pending_hedge": round(close_status.get("pending_hedge", 0.0), 6),
         }
 
@@ -600,6 +607,7 @@ class SpotFuturesArbitrageBot:
                     _update("收到终止指令，停止平仓", {})
                     break
 
+                round_new_sold = 0.0
                 # 暂停检测：撤掉卖单后等待恢复
                 if self._close_task_paused:
                     _update("平仓已暂停，等待恢复指令", {})
@@ -650,9 +658,8 @@ class SpotFuturesArbitrageBot:
                     continue
 
                 # 按权重分配数量，受 depth_ratio 和 cycle_budget 约束
-                level_qtys: list[tuple[float, float]] = []  # (price, qty)
-                allocated = 0.0
-                for i, (price, weight, level_depth) in enumerate(level_prices):
+                plan: list[dict] = []
+                for price, weight, level_depth in level_prices:
                     desired_qty = int((cycle_budget * weight) / lot) * lot
                     depth_cap = int((level_depth * self.cfg.depth_ratio) / lot) * lot
                     if depth_cap < self.cfg.min_order_qty:
@@ -666,13 +673,32 @@ class SpotFuturesArbitrageBot:
                         break
                     if qty < min_notional_qty:
                         qty = min_notional_qty
-                    level_qtys.append((price, qty))
-                    allocated += qty
-                if not all_ok or not level_qtys:
+                    plan.append({"price": price, "qty": qty, "min_qty": min_notional_qty})
+                if not all_ok or not plan:
                     _update("平仓深度不足，等待", {})
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
+                total_qty = sum(float(p["qty"]) for p in plan)
+                if total_qty > cycle_budget + 1e-12:
+                    overflow = total_qty - cycle_budget
+                    for p in reversed(plan):
+                        if overflow <= 1e-12:
+                            break
+                        reducible = max(0.0, float(p["qty"]) - float(p["min_qty"]))
+                        if reducible <= 1e-12:
+                            continue
+                        cut = min(reducible, math.floor(overflow / lot) * lot)
+                        if cut <= 1e-12:
+                            continue
+                        p["qty"] = float(p["qty"]) - cut
+                        overflow -= cut
+                    if overflow > 1e-12:
+                        _update("平仓最小名义金额导致超预算，本轮不挂", {})
+                        time.sleep(self.cfg.poll_interval_sec)
+                        continue
+
+                level_qtys = [(float(p["price"]), float(p["qty"])) for p in plan]
                 open_orders: dict[str, dict] = {}
                 for price, qty in level_qtys:
                     if qty >= self.cfg.min_order_qty:
@@ -706,6 +732,7 @@ class SpotFuturesArbitrageBot:
                             had_fill = True
                             info["filled"] = filled
                             sold += new_fill
+                            round_new_sold += new_fill
                             spot_sold_quote += new_fill * info["price"]
                             pending_hedge += new_fill
                             _update("检测到平仓成交，执行永续买入对冲", open_orders)
@@ -756,6 +783,7 @@ class SpotFuturesArbitrageBot:
                     new_fill = max(0.0, final_filled - info["filled"])
                     if new_fill > 1e-12:
                         sold += new_fill
+                        round_new_sold += new_fill
                         spot_sold_quote += new_fill * info["price"]
                         pending_hedge += new_fill
                     open_orders.pop(oid, None)
@@ -769,10 +797,10 @@ class SpotFuturesArbitrageBot:
                         if hedge_price and hedge_price > 0:
                             perp_bought_quote += hedge_qty * hedge_price
                         pending_hedge = max(0.0, pending_hedge - hedge_qty)
-                        if self.notifier:
+                        if self.notifier and round_new_sold > 1e-12:
                             self.notifier.notify_close_trade(
                                 symbol=symbol,
-                                spot_sold_this=hedge_qty,
+                                spot_sold_this=round_new_sold,
                                 total_sold=sold,
                                 total_perp_bought=perp_bought,
                                 target_qty=target_qty,
@@ -797,6 +825,8 @@ class SpotFuturesArbitrageBot:
                     "spot_sold": round(sold, 6),
                     "perp_bought": round(perp_bought, 6),
                     "pending_hedge": round(pending_hedge, 6),
+                    "spot_sell_avg_price": round(spot_sold_quote / sold, 6) if sold > 1e-12 else None,
+                    "perp_buy_avg_price": round(perp_bought_quote / perp_bought, 6) if perp_bought > 1e-12 else None,
                     "open_orders": [],
                     "msg": msg,
                 }
@@ -818,6 +848,8 @@ class SpotFuturesArbitrageBot:
                     "spot_sold": round(sold, 6),
                     "perp_bought": round(perp_bought, 6),
                     "pending_hedge": round(pending_hedge, 6),
+                    "spot_sell_avg_price": round(spot_sold_quote / sold, 6) if sold > 1e-12 else None,
+                    "perp_buy_avg_price": round(perp_bought_quote / perp_bought, 6) if perp_bought > 1e-12 else None,
                     "open_orders": [],
                     "msg": f"失败: {exc}",
                 }

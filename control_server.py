@@ -92,8 +92,10 @@ class ControlServer:
                     if new_budget <= 0:
                         return {"ok": False, "msg": "预算必须 > 0"}
                     bot.set_budget(new_budget)
-                    # 新预算意味着新一轮开仓，清零所有统计计数（含 naked_exposure）
+                    # 新预算意味着新一轮开仓：清零统计，但保留裸露仓位避免掩盖风险
+                    saved_naked = bot.naked_exposure
                     bot.fh.reset_counters()
+                    bot.naked_exposure = saved_naked
                 except ValueError:
                     return {"ok": False, "msg": "无效数字"}
             if bot.is_paused:
@@ -180,13 +182,13 @@ class ControlServer:
         elif cmd == "finish_open":
             summary = bot.finish_open()
             summary["ok"] = True
-            summary["msg"] = "已终止开仓"
+            summary["msg"] = summary.get("msg", "已终止开仓")
             return summary
 
         elif cmd == "finish_close":
             summary = bot.finish_close()
             summary["ok"] = True
-            summary["msg"] = "已终止平仓"
+            summary["msg"] = summary.get("msg", "已终止平仓")
             return summary
 
         elif cmd == "status":
