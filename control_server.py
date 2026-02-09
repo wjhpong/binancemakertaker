@@ -66,6 +66,7 @@ class ControlServer:
                 conn.close()
 
     def _handle(self, conn: socket.socket) -> None:
+        conn.settimeout(25)  # 防止单次请求挂起
         data = conn.recv(4096).decode("utf-8").strip()
         if not data:
             return

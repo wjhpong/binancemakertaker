@@ -363,19 +363,59 @@ class BinanceAdapter(ExchangeAdapter):
     # ── 账户持仓查询 ──────────────────────────────────────────
 
     def get_spot_balance(self, asset: str) -> float:
-        """查询现货可用余额（统一账户 papi）。"""
+        """查询现货余额，同时检查统一账户(papi)和普通现货钱包。"""
+        total = 0.0
+
+        # 1) 统一账户 (Portfolio Margin)
         self._spot_limiter.wait_if_needed(weight=20)
         try:
             resp = self._papi_request("GET", "/papi/v1/balance", {"asset": asset})
             if isinstance(resp, list):
                 for item in resp:
                     if item.get("asset") == asset:
-                        return float(item.get("crossMarginFree", 0))
-                return 0.0
-            return float(resp.get("crossMarginFree", 0))
+                        total += float(item.get("crossMarginFree", 0))
+                        total += float(item.get("crossMarginLocked", 0))
+                        break
+            else:
+                total += float(resp.get("crossMarginFree", 0))
+                total += float(resp.get("crossMarginLocked", 0))
         except Exception:
-            logger.exception("查询现货余额失败: asset=%s", asset)
-            return -1.0
+            logger.exception("查询统一账户余额失败: asset=%s", asset)
+
+        # 2) 普通现货钱包 (/api/v3/account)
+        try:
+            self._spot_limiter.wait_if_needed(weight=20)
+            account = self.spot.account()
+            for b in account.get("balances", []):
+                if b.get("asset") == asset:
+                    total += float(b.get("free", 0))
+                    total += float(b.get("locked", 0))
+                    break
+        except Exception:
+            logger.exception("查询普通现货余额失败: asset=%s", asset)
+
+        return total if total >= 0 else -1.0
+
+    def get_earn_balance(self, asset: str) -> float:
+        """查询活期理财余额（Simple Earn Flexible）。"""
+        self._spot_limiter.wait_if_needed(weight=1)
+        try:
+            params = {"asset": asset, "size": 100}
+            self._sign(params)
+            url = "https://api.binance.com/sapi/v1/simple-earn/flexible/position"
+            resp = self._session.get(url, params=params, timeout=10)
+            data = resp.json()
+            if resp.status_code != 200:
+                logger.warning("查询理财余额失败: %s", data)
+                return 0.0
+            total = 0.0
+            for row in data.get("rows", []):
+                if row.get("asset") == asset:
+                    total += float(row.get("totalAmount", 0))
+            return total
+        except Exception:
+            logger.exception("查询理财余额失败: asset=%s", asset)
+            return 0.0
 
     def get_futures_position(self, symbol_fut: str) -> float:
         """查询永续合约持仓量（负数=空头）。"""

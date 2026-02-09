@@ -118,7 +118,7 @@ class SpotFuturesArbitrageBot:
         self._level_to_oid: dict[int, str] = {}            # level_idx → order_id
 
         self._running: bool = True
-        self._paused: bool = False
+        self._paused: bool = True  # 启动后默认暂停，等待手动指令
         self._requote_all_levels: bool = False
         self._close_task_lock = threading.Lock()
         self._close_task_running: bool = False
@@ -196,16 +196,14 @@ class SpotFuturesArbitrageBot:
         with self._state_lock:
             self._paused = True
         logger.info("[CMD] 暂停挂单")
-        if self.notifier:
-            self.notifier.notify_pause(self.cfg.symbol_spot)
 
     def resume(self) -> None:
         """恢复挂单。"""
         with self._state_lock:
             self._paused = False
         logger.info("[CMD] 恢复挂单")
-        if self.notifier:
-            self.notifier.notify_resume(self.cfg.symbol_spot)
+        if self.notifier and not self._close_task_running:
+            self.notifier.notify_open_start(self.cfg.symbol_spot, self.cfg.total_budget)
 
     def finish_open(self) -> dict:
         """终止开仓：撤销全部买单，暂停机器人，推送汇总。"""
@@ -403,11 +401,15 @@ class SpotFuturesArbitrageBot:
         if not orders:
             return orders
 
-        spot_bids: list[tuple[float, float]] = []
-        try:
-            spot_bids = self.adapter.get_spot_depth(self.cfg.symbol_spot)
-        except Exception:
-            logger.exception("[STATUS] 获取盘口失败，返回原始档位")
+        # 使用缓存的盘口数据，避免状态查询抢占 API 额度
+        now = time.time()
+        if now - getattr(self, "_depth_cache_ts", 0) > 5:
+            try:
+                self._cached_spot_bids = self.adapter.get_spot_depth(self.cfg.symbol_spot)
+                self._depth_cache_ts = now
+            except Exception:
+                logger.exception("[STATUS] 获取盘口失败，使用缓存")
+        spot_bids = getattr(self, "_cached_spot_bids", [])
 
         for order in orders:
             cur_level = self._infer_book_level(order["price"], spot_bids)
@@ -443,16 +445,28 @@ class SpotFuturesArbitrageBot:
         # active_orders 涉及 REST 调用（推断当前档位），在锁外执行避免阻塞主循环
         snap["active_orders"] = self.get_active_orders_snapshot()
 
-        # 查询交易所实际持仓（REST 调用，锁外执行）
+        # 查询交易所实际持仓（使用缓存，避免在交易高频时阻塞 socket）
         asset = self.cfg.symbol_spot.replace("USDT", "")
-        try:
-            snap["actual_spot_balance"] = round(self.adapter.get_spot_balance(asset), 6)
-        except Exception:
-            snap["actual_spot_balance"] = None
-        try:
-            snap["actual_futures_position"] = round(self.adapter.get_futures_position(self.cfg.symbol_fut), 6)
-        except Exception:
-            snap["actual_futures_position"] = None
+        now = time.time()
+        cache_ttl = 30  # 30秒缓存
+        if now - getattr(self, "_balance_cache_ts", 0) > cache_ttl:
+            try:
+                self._cached_spot_balance = round(self.adapter.get_spot_balance(asset), 6)
+            except Exception:
+                self._cached_spot_balance = None
+            try:
+                self._cached_earn_balance = round(self.adapter.get_earn_balance(asset), 6)
+            except Exception:
+                self._cached_earn_balance = None
+            try:
+                self._cached_futures_position = round(self.adapter.get_futures_position(self.cfg.symbol_fut), 6)
+            except Exception:
+                self._cached_futures_position = None
+            self._balance_cache_ts = now
+
+        snap["actual_spot_balance"] = getattr(self, "_cached_spot_balance", None)
+        snap["actual_earn_balance"] = getattr(self, "_cached_earn_balance", None)
+        snap["actual_futures_position"] = getattr(self, "_cached_futures_position", None)
 
         return snap
 
@@ -483,6 +497,9 @@ class SpotFuturesArbitrageBot:
                 "open_orders": [],
                 "msg": "平仓任务启动",
             }
+
+        if self.notifier:
+            self.notifier.notify_close_start(symbol, qty)
 
         th = threading.Thread(
             target=self._run_close_task,
@@ -519,9 +536,11 @@ class SpotFuturesArbitrageBot:
     def _run_close_task(self, symbol: str, target_qty: float) -> None:
         sold = 0.0
         perp_bought = 0.0
+        spot_sold_quote = 0.0      # 现货卖出总金额 (price × qty)
+        perp_bought_quote = 0.0    # 永续买入总金额 (price × qty)
         with self._close_task_lock:
             pending_hedge = max(0.0, self._close_pending_hedge)
-        max_rounds = 200
+        max_rounds = 50000  # 每轮只卖 budget_pct，需要很多轮
         max_wait_sec = 8.0
 
         def _format_close_orders(open_orders: dict[str, dict]) -> list[dict]:
@@ -543,6 +562,8 @@ class SpotFuturesArbitrageBot:
                         "spot_sold": round(sold, 6),
                         "perp_bought": round(perp_bought, 6),
                         "pending_hedge": round(pending_hedge, 6),
+                        "spot_sell_avg_price": round(spot_sold_quote / sold, 6) if sold > 1e-12 else None,
+                        "perp_buy_avg_price": round(perp_bought_quote / perp_bought, 6) if perp_bought > 1e-12 else None,
                         "open_orders": _format_close_orders(open_orders or {}),
                         "msg": msg,
                     }
@@ -594,14 +615,19 @@ class SpotFuturesArbitrageBot:
                     continue
 
                 # 平仓挂 3 档卖单（卖一/卖二/卖三），与开仓对称
+                # 每轮限量：budget_pct × target_qty，不超过剩余量
                 lot = self.cfg.lot_size
-                level_prices: list[tuple[float, float]] = []  # (price, weight)
+                cycle_budget = min(target_qty * self.cfg.budget_pct, remaining)
+                if cycle_budget < lot:
+                    break
+
+                level_prices: list[tuple[float, float, float]] = []  # (price, weight, level_depth)
                 all_ok = True
                 for lvl_idx, weight in self._LEVEL_WEIGHTS.items():
                     if lvl_idx > len(asks):
                         all_ok = False
                         break
-                    ask_price = asks[lvl_idx - 1][0]
+                    ask_price, ask_depth = asks[lvl_idx - 1]
                     if ask_price <= 0:
                         all_ok = False
                         break
@@ -609,26 +635,35 @@ class SpotFuturesArbitrageBot:
                     if spread < self.min_spread:
                         all_ok = False
                         break
-                    level_prices.append((ask_price, weight))
+                    level_prices.append((ask_price, weight, ask_depth))
                 if not all_ok or not level_prices:
                     _update("平仓价差未达门槛，等待", {})
                     time.sleep(self.cfg.poll_interval_sec)
                     continue
 
-                # 按权重分配数量
+                # 按权重分配数量，受 depth_ratio 和 cycle_budget 约束
                 level_qtys: list[tuple[float, float]] = []  # (price, qty)
                 allocated = 0.0
-                for i, (price, weight) in enumerate(level_prices):
-                    if i == len(level_prices) - 1:
-                        qty = self._floor_to_lot(remaining - allocated)
-                    else:
-                        qty = self._floor_to_lot(remaining * weight)
-                        allocated += qty
+                for i, (price, weight, level_depth) in enumerate(level_prices):
+                    desired_qty = int((cycle_budget * weight) / lot) * lot
+                    depth_cap = int((level_depth * self.cfg.depth_ratio) / lot) * lot
+                    if depth_cap < self.cfg.min_order_qty:
+                        all_ok = False
+                        break
+                    qty = min(desired_qty, depth_cap)
                     # Notional 下限：确保 price × qty >= 5.5 USDT
-                    min_notional_qty = int(5.5 / price / lot + 1) * lot if price > 0 else 0
-                    if 0 < qty < min_notional_qty:
+                    min_notional_qty = math.ceil((5.5 / price) / lot) * lot if price > 0 else 0
+                    if min_notional_qty > depth_cap + 1e-12:
+                        all_ok = False
+                        break
+                    if qty < min_notional_qty:
                         qty = min_notional_qty
                     level_qtys.append((price, qty))
+                    allocated += qty
+                if not all_ok or not level_qtys:
+                    _update("平仓深度不足，等待", {})
+                    time.sleep(self.cfg.poll_interval_sec)
+                    continue
 
                 open_orders: dict[str, dict] = {}
                 for price, qty in level_qtys:
@@ -640,6 +675,7 @@ class SpotFuturesArbitrageBot:
                 _update(f"已挂平仓卖单 {len(open_orders)} 笔", open_orders)
 
                 started = time.time()
+                poll_interval = 0.3  # 初始快轮询
                 while open_orders and (time.time() - started) < max_wait_sec:
                     if _should_stop():
                         _update("收到终止指令，撤销当前平仓挂单", open_orders)
@@ -651,6 +687,7 @@ class SpotFuturesArbitrageBot:
                     asks_now = self.adapter.get_spot_asks(symbol, levels=5)
                     ask5 = asks_now[4][0] if len(asks_now) >= 5 else None
                     drift = False
+                    had_fill = False
 
                     for oid, info in list(open_orders.items()):
                         filled = self.adapter.get_order_filled_qty(symbol, oid)
@@ -658,16 +695,29 @@ class SpotFuturesArbitrageBot:
                             continue
                         new_fill = max(0.0, filled - info["filled"])
                         if new_fill > 1e-12:
+                            had_fill = True
                             info["filled"] = filled
                             sold += new_fill
+                            spot_sold_quote += new_fill * info["price"]
                             pending_hedge += new_fill
                             _update("检测到平仓成交，执行永续买入对冲", open_orders)
                             hedge_qty = self._floor_to_lot(pending_hedge)
                             if hedge_qty >= self.cfg.lot_size:
                                 try:
                                     self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
+                                    hedge_price = getattr(self.adapter, "last_hedge_avg_price", None)
                                     perp_bought += hedge_qty
+                                    if hedge_price and hedge_price > 0:
+                                        perp_bought_quote += hedge_qty * hedge_price
                                     pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                                    if self.notifier:
+                                        self.notifier.notify_close_trade(
+                                            symbol=symbol,
+                                            spot_sold_this=new_fill,
+                                            total_sold=sold,
+                                            total_perp_bought=perp_bought,
+                                            target_qty=target_qty,
+                                        )
                                 except Exception:
                                     logger.exception("[CLOSE] 永续买入对冲失败，保留 pending_hedge=%.6f", pending_hedge)
                         if filled >= info["qty"] - 1e-12:
@@ -679,7 +729,12 @@ class SpotFuturesArbitrageBot:
                     if drift:
                         _update("卖单已掉出卖五，撤单重挂", open_orders)
                         break
-                    time.sleep(0.25)
+                    # 渐进式轮询：有成交时重置为快轮询，无成交时逐步放慢
+                    if had_fill:
+                        poll_interval = 0.3
+                    else:
+                        poll_interval = min(poll_interval + 0.2, 1.5)
+                    time.sleep(poll_interval)
 
                 for oid, info in list(open_orders.items()):
                     before = self.adapter.get_order_filled_qty(symbol, oid)
@@ -693,6 +748,7 @@ class SpotFuturesArbitrageBot:
                     new_fill = max(0.0, final_filled - info["filled"])
                     if new_fill > 1e-12:
                         sold += new_fill
+                        spot_sold_quote += new_fill * info["price"]
                         pending_hedge += new_fill
                     open_orders.pop(oid, None)
 
@@ -700,8 +756,19 @@ class SpotFuturesArbitrageBot:
                 if hedge_qty >= self.cfg.lot_size:
                     try:
                         self.adapter.place_futures_market_buy(self.cfg.symbol_fut, hedge_qty)
+                        hedge_price = getattr(self.adapter, "last_hedge_avg_price", None)
                         perp_bought += hedge_qty
+                        if hedge_price and hedge_price > 0:
+                            perp_bought_quote += hedge_qty * hedge_price
                         pending_hedge = max(0.0, pending_hedge - hedge_qty)
+                        if self.notifier:
+                            self.notifier.notify_close_trade(
+                                symbol=symbol,
+                                spot_sold_this=hedge_qty,
+                                total_sold=sold,
+                                total_perp_bought=perp_bought,
+                                target_qty=target_qty,
+                            )
                     except Exception:
                         logger.exception("[CLOSE] 轮末永续买入对冲失败，保留 pending_hedge=%.6f", pending_hedge)
 

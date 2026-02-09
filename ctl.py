@@ -36,7 +36,7 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
         try:
             result = subprocess.run(
                 ["ssh", SSH_HOST, remote_cmd],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=30,
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "msg": "SSH 连接超时，请检查网络或 EC2 状态"}
@@ -85,6 +85,8 @@ def print_resp(resp: dict) -> None:
         # 判断当前方向
         if close_running:
             direction = "平仓（卖出）"
+        elif resp["paused"] and resp.get("spot_filled_base", 0.0) < 1e-12:
+            direction = "待命"
         else:
             direction = "开仓（买入）"
 
@@ -92,17 +94,17 @@ def print_resp(resp: dict) -> None:
         print(f"代币: {symbol}")
         print(f"状态: {state}")
         print(f"当前方向: {direction}")
-        print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
 
         # 根据方向显示进度
         if close_running:
-            # 平仓模式：显示卖出进度
+            # 平仓模式
             close_paused = close_task.get("paused", False)
             if close_paused:
                 print("⏸ 平仓已暂停")
             target = close_task.get("target_qty", 0.0)
             sold = close_task.get("spot_sold", 0.0)
             perp_bought = close_task.get("perp_bought", 0.0)
+            print(f"平仓目标: {target:.6f} 币")
             print(f"卖出进度: 已卖出 {sold:.6f} / {target:.6f} 币")
             print(f"永续已买入对冲: {perp_bought:.6f} 币")
             pending = close_task.get("pending_hedge", 0.0)
@@ -120,8 +122,12 @@ def print_resp(resp: dict) -> None:
                     )
             else:
                 print("活跃卖单: 无")
+        elif direction == "待命":
+            # 待命模式：不显示开仓细节
+            pass
         else:
-            # 开仓模式：显示买入进度
+            # 开仓模式
+            print(f"开仓预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
             print(f"买入进度: 已买入 {resp.get('spot_filled_base', 0.0):.6f} 币")
             print(f"永续已卖出对冲: {resp.get('perp_hedged_base', 0.0):.6f} 币")
             # 显示开仓活跃买单
@@ -141,26 +147,46 @@ def print_resp(resp: dict) -> None:
 
         # 通用信息
         print(f"最小spread: {resp.get('min_spread_bps', 0.0):.4f} bps")
-        spot_avg = resp.get("spot_avg_price")
-        perp_avg = resp.get("perp_avg_price")
-        print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
-        print(f"永续卖出均价: {perp_avg:.6f}" if perp_avg is not None else "永续卖出均价: -")
-        priced_base = resp.get("perp_avg_priced_base", 0.0)
-        if priced_base > 0:
-            print(f"永续均价覆盖量: {priced_base:.6f} 币")
-        print(f"裸露仓位: {resp['naked_exposure']:.4f}")
+        if close_running:
+            # 平仓模式：显示卖出均价和买入均价
+            spot_avg = close_task.get("spot_sell_avg_price")
+            perp_avg = close_task.get("perp_buy_avg_price")
+            print(f"现货卖出均价: {spot_avg:.6f}" if spot_avg is not None else "现货卖出均价: -")
+            print(f"永续买入均价: {perp_avg:.6f}" if perp_avg is not None else "永续买入均价: -")
+            print(f"裸露仓位: {resp['naked_exposure']:.4f}")
+        elif direction != "待命":
+            # 开仓模式：显示买入均价和卖出均价
+            spot_avg = resp.get("spot_avg_price")
+            perp_avg = resp.get("perp_avg_price")
+            print(f"现货买入均价: {spot_avg:.6f}" if spot_avg is not None else "现货买入均价: -")
+            print(f"永续卖出均价: {perp_avg:.6f}" if perp_avg is not None else "永续卖出均价: -")
+            priced_base = resp.get("perp_avg_priced_base", 0.0)
+            if priced_base > 0:
+                print(f"永续均价覆盖量: {priced_base:.6f} 币")
+            print(f"裸露仓位: {resp['naked_exposure']:.4f}")
 
         # 交易所实际持仓
         actual_spot = resp.get("actual_spot_balance")
+        actual_earn = resp.get("actual_earn_balance")
         actual_fut = resp.get("actual_futures_position")
         print("── 交易所实际持仓 ──")
         if actual_spot is not None:
             print(f"  现货余额: {actual_spot:.6f} 币")
         else:
             print("  现货余额: 查询失败")
+        if actual_earn is not None and actual_earn > 0:
+            print(f"  理财余额: {actual_earn:.6f} 币")
+        elif actual_earn is not None:
+            pass  # 理财为0时不显示
+        else:
+            print("  理财余额: 查询失败")
+        if actual_spot is not None and actual_earn is not None:
+            total_spot = actual_spot + actual_earn
+            if actual_earn > 0:
+                print(f"  现货合计: {total_spot:.6f} 币")
         if actual_fut is not None:
-            direction = "空头" if actual_fut < 0 else ("多头" if actual_fut > 0 else "无仓位")
-            print(f"  永续合约: {abs(actual_fut):.6f} 币 ({direction})")
+            fut_direction = "空头" if actual_fut < 0 else ("多头" if actual_fut > 0 else "无仓位")
+            print(f"  永续合约: {abs(actual_fut):.6f} 币 ({fut_direction})")
         else:
             print("  永续合约: 查询失败")
 
@@ -253,13 +279,27 @@ def interactive() -> None:
                 status = send_cmd("status")
                 spot_filled = status.get("spot_filled_base", 0.0)
                 perp_hedged = status.get("perp_hedged_base", 0.0)
-                print(f"  当前持仓: 现货已买入 {spot_filled:.6f} 币, 永续已对冲 {perp_hedged:.6f} 币")
-                if spot_filled <= 0:
+                # 如果机器人内部记录为0，使用交易所实际持仓
+                actual_spot = status.get("actual_spot_balance") or 0.0
+                actual_earn = status.get("actual_earn_balance") or 0.0
+                actual_total = actual_spot + actual_earn
+                actual_fut = abs(status.get("actual_futures_position") or 0.0)
+                if spot_filled > 0:
+                    max_close = spot_filled
+                    print(f"  当前持仓: 现货已买入 {spot_filled:.6f} 币, 永续已对冲 {perp_hedged:.6f} 币")
+                elif actual_total > 0 or actual_fut > 0:
+                    # 机器人内部无记录，但交易所有实际仓位
+                    max_close = min(actual_total, actual_fut) if actual_total > 0 and actual_fut > 0 else max(actual_total, actual_fut)
+                    print(f"  机器人内部无记录，但交易所有实际仓位:")
+                    print(f"  现货(含理财): {actual_total:.6f} 币")
+                    print(f"  永续空头: {actual_fut:.6f} 币")
+                    print(f"  建议平仓量: {max_close:.6f} 币")
+                else:
                     print("  ⚠ 当前无持仓，无法平仓")
                     _print_menu()
                     continue
                 try:
-                    qty = input(f"请输入平仓数量（币，最大 {spot_filled:.6f}）: ").strip()
+                    qty = input(f"请输入平仓数量（币，最大 {max_close:.6f}）: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break

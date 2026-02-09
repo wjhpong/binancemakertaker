@@ -123,7 +123,7 @@ def main() -> None:
     )
     bot.notifier = notifier
     if notifier:
-        notifier.notify_start(cfg.symbol_spot, cfg.total_budget)
+        notifier.notify_start(cfg.symbol_spot)
 
     # ── 信号处理 ──
     def shutdown(signum, _frame):

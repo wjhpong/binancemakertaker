@@ -1,4 +1,4 @@
-"""飞书群机器人 Webhook 通知器 —— 仅推送成交进度摘要。"""
+"""飞书群机器人 Webhook 通知器 —— 推送状态变更和成交记录。"""
 
 from __future__ import annotations
 
@@ -42,37 +42,31 @@ class FeishuNotifier:
         payload = {"msg_type": "text", "content": {"text": text}}
         return self._post(payload)
 
-    def notify_start(self, symbol: str, budget_base: float) -> None:
-        text = (
-            f"[机器人启动] {symbol}\n"
-            f"预算: {budget_base:.4f} 币"
+    def _send_async(self, text: str) -> None:
+        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
+
+    # ── 状态变更通知 ──────────────────────────────────────────
+
+    def notify_start(self, symbol: str) -> None:
+        """机器人服务启动（不含预算）。"""
+        self._send_async(f"[机器人已启动] {symbol}")
+
+    def notify_open_start(self, symbol: str, budget: float) -> None:
+        """开始建仓。"""
+        self._send_async(
+            f"[开始建仓] {symbol}\n"
+            f"预算: {budget:.4f} 币"
         )
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
 
-    def notify_pause(self, symbol: str) -> None:
-        text = f"[机器人暂停] {symbol}\n挂单已暂停，等待恢复指令"
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
-
-    def notify_resume(self, symbol: str) -> None:
-        text = f"[机器人恢复] {symbol}\n已恢复挂单"
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
-
-    def notify_progress(
-        self,
-        symbol: str,
-        total_spot_filled_base: float,
-        total_perp_hedged_base: float,
-    ) -> None:
-        """推送累计进度（仅现货成交量和永续对冲量）。"""
-        text = (
-            f"[套利进度] {symbol}\n"
-            f"现货累计成交: {total_spot_filled_base:.4f} 币\n"
-            f"永续累计对冲: {total_perp_hedged_base:.4f} 币"
+    def notify_close_start(self, symbol: str, target_qty: float) -> None:
+        """开始平仓。"""
+        self._send_async(
+            f"[开始平仓] {symbol}\n"
+            f"目标: {target_qty:.4f} 币"
         )
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
 
     def notify_finish(self, summary: dict) -> None:
-        """终止时推送汇总信息（开仓终止或平仓终止）。"""
+        """终止时推送汇总信息。"""
         action = summary.get("action", "终止")
         symbol = summary.get("symbol", "")
         spot_avg = summary.get("spot_avg_price")
@@ -85,7 +79,7 @@ class FeishuNotifier:
             perp_qty = summary.get("perp_hedged_base", 0.0)
             naked = summary.get("naked_exposure", 0.0)
             lines = [
-                f"[终止开仓] {symbol}",
+                f"[终止建仓] {symbol}",
                 f"现货买入: {spot_qty:.4f} 币",
                 f"永续卖出: {perp_qty:.4f} 币",
                 f"现货均价: {spot_avg_str}",
@@ -107,5 +101,38 @@ class FeishuNotifier:
             if pending > 1e-12:
                 lines.append(f"待对冲: {pending:.4f} 币")
 
-        text = "\n".join(lines)
-        threading.Thread(target=self.send_text, args=(text,), daemon=True).start()
+        self._send_async("\n".join(lines))
+
+    # ── 成交记录通知 ──────────────────────────────────────────
+
+    def notify_open_trade(
+        self,
+        symbol: str,
+        hedge_qty: float,
+        hedge_price: float | None,
+        total_filled: float,
+        total_budget: float,
+    ) -> None:
+        """开仓成交记录：现货买入 → 永续卖出对冲。"""
+        price_str = f"@ {hedge_price:.6f}" if hedge_price and hedge_price > 0 else ""
+        self._send_async(
+            f"[开仓成交] {symbol}\n"
+            f"对冲: {hedge_qty:.4f} 币 {price_str}\n"
+            f"累计: {total_filled:.4f} / {total_budget:.4f} 币"
+        )
+
+    def notify_close_trade(
+        self,
+        symbol: str,
+        spot_sold_this: float,
+        total_sold: float,
+        total_perp_bought: float,
+        target_qty: float,
+    ) -> None:
+        """平仓成交记录：现货卖出 + 累计进度。"""
+        self._send_async(
+            f"[平仓成交] {symbol}\n"
+            f"本次卖出: {spot_sold_this:.4f} 币\n"
+            f"累计现货卖出: {total_sold:.4f} / {target_qty:.4f} 币\n"
+            f"累计永续平仓: {total_perp_bought:.4f} 币"
+        )

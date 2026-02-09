@@ -268,10 +268,12 @@ class FillHandler:
                         self.cfg.symbol_fut, hedge_id, hedge_qty, success=True, price=hedge_price
                     )
                 if self.notifier:
-                    self.notifier.notify_progress(
+                    self.notifier.notify_open_trade(
                         symbol=self.cfg.symbol_spot,
-                        total_spot_filled_base=self.total_filled_base,
-                        total_perp_hedged_base=self.total_hedged_base + hedge_qty,
+                        hedge_qty=hedge_qty,
+                        hedge_price=hedge_price,
+                        total_filled=self.total_filled_base,
+                        total_budget=self.cfg.total_budget,
                     )
                 self.total_hedged_base += hedge_qty
                 if hedge_price and hedge_price > 0:
@@ -350,10 +352,12 @@ class FillHandler:
                     self.total_hedged_base_priced += hedge_qty
                 self.naked_exposure = max(0.0, self.naked_exposure - hedge_qty)
                 if self.notifier:
-                    self.notifier.notify_progress(
+                    self.notifier.notify_open_trade(
                         symbol=self.cfg.symbol_spot,
-                        total_spot_filled_base=self.total_filled_base,
-                        total_perp_hedged_base=self.total_hedged_base,
+                        hedge_qty=hedge_qty,
+                        hedge_price=hedge_price,
+                        total_filled=self.total_filled_base,
+                        total_budget=self.cfg.total_budget,
                     )
                 return True
             except Exception as exc:
