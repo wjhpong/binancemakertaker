@@ -320,6 +320,12 @@ def interactive() -> None:
         if choice == 3:
             status = send_cmd("status")
             close_task = (status.get("close_task") or {})
+            is_paused = status.get("paused", False)
+            spot_filled = status.get("spot_filled_base", 0.0)
+            if is_paused and not close_task.get("running") and spot_filled < 1e-12:
+                print("⚠ 当前已处于待命状态")
+                _print_menu()
+                continue
             if close_task.get("running"):
                 resp = send_cmd("pause_close")
             else:
@@ -344,6 +350,8 @@ def interactive() -> None:
         if choice == 5:
             status = send_cmd("status")
             close_task = (status.get("close_task") or {})
+            is_paused = status.get("paused", False)
+            spot_filled = status.get("spot_filled_base", 0.0)
             if close_task.get("running"):
                 # 当前在平仓中
                 try:
@@ -356,6 +364,11 @@ def interactive() -> None:
                     _print_menu()
                     continue
                 resp = send_cmd("finish_close")
+            elif is_paused and spot_filled < 1e-12:
+                # 待命状态，没有开仓也没有平仓
+                print("⚠ 当前处于待命状态，无需终止")
+                _print_menu()
+                continue
             else:
                 # 当前在开仓中
                 try:
