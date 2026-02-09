@@ -150,6 +150,20 @@ def print_resp(resp: dict) -> None:
             print(f"永续均价覆盖量: {priced_base:.6f} 币")
         print(f"裸露仓位: {resp['naked_exposure']:.4f}")
 
+        # 交易所实际持仓
+        actual_spot = resp.get("actual_spot_balance")
+        actual_fut = resp.get("actual_futures_position")
+        print("── 交易所实际持仓 ──")
+        if actual_spot is not None:
+            print(f"  现货余额: {actual_spot:.6f} 币")
+        else:
+            print("  现货余额: 查询失败")
+        if actual_fut is not None:
+            direction = "空头" if actual_fut < 0 else ("多头" if actual_fut > 0 else "无仓位")
+            print(f"  永续合约: {abs(actual_fut):.6f} 币 ({direction})")
+        else:
+            print("  永续合约: 查询失败")
+
         # 上次平仓结果（平仓已结束但有历史记录）
         if not close_running and close_task.get("target_qty"):
             print(f"上次平仓: {close_task.get('msg', '-')} "

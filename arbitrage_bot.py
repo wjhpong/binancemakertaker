@@ -78,6 +78,12 @@ class ExchangeAdapter:
     def place_futures_market_buy(self, symbol_fut: str, qty: float) -> str:
         raise NotImplementedError
 
+    def get_spot_balance(self, asset: str) -> float:
+        raise NotImplementedError
+
+    def get_futures_position(self, symbol_fut: str) -> float:
+        raise NotImplementedError
+
 
 @dataclass
 class LevelOrder:
@@ -436,6 +442,18 @@ class SpotFuturesArbitrageBot:
             }
         # active_orders 涉及 REST 调用（推断当前档位），在锁外执行避免阻塞主循环
         snap["active_orders"] = self.get_active_orders_snapshot()
+
+        # 查询交易所实际持仓（REST 调用，锁外执行）
+        asset = self.cfg.symbol_spot.replace("USDT", "")
+        try:
+            snap["actual_spot_balance"] = round(self.adapter.get_spot_balance(asset), 6)
+        except Exception:
+            snap["actual_spot_balance"] = None
+        try:
+            snap["actual_futures_position"] = round(self.adapter.get_futures_position(self.cfg.symbol_fut), 6)
+        except Exception:
+            snap["actual_futures_position"] = None
+
         return snap
 
     def _floor_to_lot(self, qty: float) -> float:

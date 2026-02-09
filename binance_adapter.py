@@ -359,3 +359,35 @@ class BinanceAdapter(ExchangeAdapter):
     def last_hedge_avg_price(self) -> float | None:
         """最近一次对冲的成交均价。"""
         return getattr(self, "_last_hedge_avg_price", None)
+
+    # ── 账户持仓查询 ──────────────────────────────────────────
+
+    def get_spot_balance(self, asset: str) -> float:
+        """查询现货可用余额（统一账户 papi）。"""
+        self._spot_limiter.wait_if_needed(weight=20)
+        try:
+            resp = self._papi_request("GET", "/papi/v1/balance", {"asset": asset})
+            if isinstance(resp, list):
+                for item in resp:
+                    if item.get("asset") == asset:
+                        return float(item.get("crossMarginFree", 0))
+                return 0.0
+            return float(resp.get("crossMarginFree", 0))
+        except Exception:
+            logger.exception("查询现货余额失败: asset=%s", asset)
+            return -1.0
+
+    def get_futures_position(self, symbol_fut: str) -> float:
+        """查询永续合约持仓量（负数=空头）。"""
+        self._fut_limiter.wait_if_needed(weight=5)
+        try:
+            resp = self._papi_request("GET", "/papi/v1/um/positionRisk", {"symbol": symbol_fut})
+            if isinstance(resp, list):
+                for item in resp:
+                    if item.get("symbol") == symbol_fut:
+                        return float(item.get("positionAmt", 0))
+                return 0.0
+            return float(resp.get("positionAmt", 0))
+        except Exception:
+            logger.exception("查询合约持仓失败: symbol=%s", symbol_fut)
+            return 0.0
