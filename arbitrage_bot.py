@@ -84,6 +84,9 @@ class ExchangeAdapter:
     def get_futures_position(self, symbol_fut: str) -> float:
         raise NotImplementedError
 
+    def get_earn_balance(self, asset: str) -> float:
+        raise NotImplementedError
+
 
 @dataclass
 class LevelOrder:
@@ -454,9 +457,10 @@ class SpotFuturesArbitrageBot:
                 "perp_avg_priced_base": round(self.fh.total_hedged_base_priced, 6),
                 "min_spread_bps": round(self.fee.min_spread_bps, 4),
                 "naked_exposure": round(self.naked_exposure, 4),
-                "close_task": {**self._close_task_status, "paused": self._close_task_paused},
-                "close_pending_hedge": round(self._close_pending_hedge, 6),
             }
+        with self._close_task_lock:
+            snap["close_task"] = {**self._close_task_status, "paused": self._close_task_paused}
+            snap["close_pending_hedge"] = round(self._close_pending_hedge, 6)
         # active_orders 涉及 REST 调用（推断当前档位），在锁外执行避免阻塞主循环
         snap["active_orders"] = self.get_active_orders_snapshot()
 

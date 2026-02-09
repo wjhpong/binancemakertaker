@@ -193,11 +193,6 @@ def print_resp(resp: dict) -> None:
         else:
             print("  永续合约: 查询失败")
 
-        # 上次平仓结果（平仓已结束但有历史记录）
-        if not close_running and close_task.get("target_qty"):
-            print(f"上次平仓: {close_task.get('msg', '-')} "
-                  f"(卖出 {close_task.get('spot_sold', 0.0):.6f} / "
-                  f"{close_task.get('target_qty', 0.0):.6f} 币)")
 
     elif "budget" in resp and "paused" not in resp:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")

@@ -363,7 +363,11 @@ class BinanceAdapter(ExchangeAdapter):
     # ── 账户持仓查询 ──────────────────────────────────────────
 
     def get_spot_balance(self, asset: str) -> float:
-        """查询现货余额，同时检查统一账户(papi)和普通现货钱包。"""
+        """查询现货余额，同时检查统一账户(papi)和普通现货钱包。
+
+        注意：Portfolio Margin 模式下，现货余额可能已包含在 papi 返回中，
+        此时两处相加可能导致重复计算。请根据实际账户类型确认。
+        """
         total = 0.0
 
         # 1) 统一账户 (Portfolio Margin)

@@ -15,7 +15,6 @@ class FeishuNotifier:
 
     def __init__(self, webhook_url: str) -> None:
         self._url = webhook_url
-        self._lock = threading.Lock()
 
     # ── 底层发送 ──────────────────────────────────────────────
 
