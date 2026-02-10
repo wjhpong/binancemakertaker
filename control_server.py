@@ -21,8 +21,15 @@ _SOCK_PATH = Path("/tmp/arb-bot.sock")
 class ControlServer:
     """监听 Unix socket，接收 JSON 命令，返回 JSON 响应。"""
 
-    def __init__(self, bot: SpotFuturesArbitrageBot) -> None:
+    def __init__(
+        self,
+        bot: SpotFuturesArbitrageBot,
+        account_name: str = "",
+        account_label: str = "",
+    ) -> None:
         self.bot = bot
+        self._account_name = account_name
+        self._account_label = account_label
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
@@ -86,25 +93,29 @@ class ControlServer:
         bot = self.bot
 
         if cmd == "start":
+            reset_done = False
+            reset_hint = ""
             if args:
                 try:
                     new_budget = float(args[0])
                     if new_budget <= 0:
                         return {"ok": False, "msg": "预算必须 > 0"}
                     bot.set_budget(new_budget)
-                    # 新预算意味着新一轮开仓：清零统计，但保留裸露仓位避免掩盖风险
-                    saved_naked = bot.naked_exposure
-                    bot.fh.reset_counters()
-                    bot.naked_exposure = saved_naked
+                    # 仅在安全条件下才允许重置统计（暂停且无挂单且无平仓任务）
+                    reset_done = bot.reset_round_counters_if_safe()
+                    if not reset_done:
+                        reset_hint = "（运行中仅更新预算，不重置统计）"
                 except ValueError:
                     return {"ok": False, "msg": "无效数字"}
             if bot.is_paused:
                 bot.resume()
                 if args:
-                    return {"ok": True, "msg": f"新一轮开仓: 预算 {new_budget:.6f} 币，已恢复挂单"}
+                    if reset_done:
+                        return {"ok": True, "msg": f"新一轮开仓: 预算 {new_budget:.6f} 币，已恢复挂单"}
+                    return {"ok": True, "msg": f"预算已更新为 {new_budget:.6f} 币，已恢复挂单{reset_hint}"}
                 return {"ok": True, "msg": "已恢复挂单"}
             if args:
-                return {"ok": True, "msg": f"新一轮开仓: 预算 {new_budget:.6f} 币，已在运行中"}
+                return {"ok": True, "msg": f"预算已更新为 {new_budget:.6f} 币，已在运行中{reset_hint}"}
             return {"ok": True, "msg": "已在运行中"}
 
         elif cmd == "pause":
@@ -194,6 +205,8 @@ class ControlServer:
         elif cmd == "status":
             snap = bot.get_status_snapshot()
             snap["ok"] = True
+            snap["account_name"] = self._account_name
+            snap["account_label"] = self._account_label
             return snap
 
         else:

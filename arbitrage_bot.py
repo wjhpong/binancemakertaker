@@ -138,6 +138,7 @@ class SpotFuturesArbitrageBot:
             adapter=adapter,
             cfg=cfg,
             active_orders=self._active_orders,
+            state_lock=self._state_lock,
             fill_queue=fill_queue,
             trade_logger=trade_logger,
         )
@@ -362,6 +363,20 @@ class SpotFuturesArbitrageBot:
             old = self.fee.min_spread_bps
             self.fee = replace(self.fee, min_spread_bps=new_bps)
         logger.info("[CMD] 最小spread从 %.4f bps 改为 %.4f bps", old, new_bps)
+
+    def reset_round_counters_if_safe(self) -> bool:
+        """仅在安全时重置统计计数器，保留裸露仓位。
+
+        检查条件和执行重置在同一锁内完成，避免 check-then-act 竞态。
+        """
+        with self._state_lock:
+            with self._close_task_lock:
+                if not self._paused or bool(self._active_orders) or self._close_task_running:
+                    return False
+            saved_naked = self.naked_exposure
+            self.fh.reset_counters()
+            self.naked_exposure = saved_naked
+        return True
 
     @property
     def min_spread(self) -> float:
@@ -985,10 +1000,12 @@ class SpotFuturesArbitrageBot:
 
     def _orders_drifted(self, spot_bids: list[tuple[float, float]]) -> bool:
         """检查挂单价格是否已漂移到盘口买5以外（价格上涨导致），需要全撤重挂。"""
-        if not self._active_orders or len(spot_bids) < 5:
+        with self._state_lock:
+            active_orders = list(self._active_orders.values())
+        if not active_orders or len(spot_bids) < 5:
             return False
         bid5_price = spot_bids[4][0]  # 买五价格
-        for order in self._active_orders.values():
+        for order in active_orders:
             if order.price < bid5_price:
                 logger.info(
                     "[DRIFT] 买%d 挂单价 %.4f 已低于盘口买5 %.4f，需全撤重挂",
@@ -1001,7 +1018,9 @@ class SpotFuturesArbitrageBot:
         """检查当前挂单是否已低于最小利润护栏。"""
         if fut_bid <= 0:
             return False
-        for order in self._active_orders.values():
+        with self._state_lock:
+            active_orders = list(self._active_orders.values())
+        for order in active_orders:
             spread = (fut_bid - order.price) / order.price
             if spread < self.min_spread:
                 logger.info(
@@ -1035,10 +1054,9 @@ class SpotFuturesArbitrageBot:
 
     def _cancel_level_order(self, level_idx: int) -> float:
         """取消指定档位的挂单，返回发现的未对冲成交量。不清理字典——调用方负责。"""
-        oid = self._level_to_oid.get(level_idx)
-        if oid is None:
-            return 0.0
-        order = self._active_orders.get(oid)
+        with self._state_lock:
+            oid = self._level_to_oid.get(level_idx)
+            order = self._active_orders.get(oid) if oid is not None else None
         if order is None:
             return 0.0
 
@@ -1079,8 +1097,9 @@ class SpotFuturesArbitrageBot:
                 price=price,
                 qty=qty,
             )
-            self._active_orders[oid] = order
-            self._level_to_oid[level_idx] = oid
+            with self._state_lock:
+                self._active_orders[oid] = order
+                self._level_to_oid[level_idx] = oid
 
             logger.info("[QUOTE] 买%d 挂单: price=%s, qty=%.2f, order_id=%s",
                         level_idx, price, qty, oid)
@@ -1105,7 +1124,8 @@ class SpotFuturesArbitrageBot:
         仅在挂单漂移(drift)时通过主循环的 _orders_drifted 统一撤单。
         """
         desired_map = {d[0]: d for d in desired}
-        current_levels = set(self._level_to_oid.keys())
+        with self._state_lock:
+            current_levels = set(self._level_to_oid.keys())
         desired_levels = set(desired_map.keys())
 
         # 不再取消"不在desired但仍在活跃"的档位 —— 保留它们
@@ -1120,9 +1140,10 @@ class SpotFuturesArbitrageBot:
             _, new_price, new_qty = desired_map[lv]
             if self._need_reprice_level(lv, new_price, new_qty):
                 total_unhedged += self._cancel_level_order(lv)
-                old_oid = self._level_to_oid.pop(lv, None)
-                if old_oid:
-                    self._active_orders.pop(old_oid, None)
+                with self._state_lock:
+                    old_oid = self._level_to_oid.pop(lv, None)
+                    if old_oid:
+                        self._active_orders.pop(old_oid, None)
                 to_add.add(lv)
 
         # 3. 先对冲取消过程发现的成交

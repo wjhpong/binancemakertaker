@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import threading
 import time
 from collections import deque
 from typing import Optional
@@ -37,11 +38,13 @@ class RateLimiter:
         self._max = max_weight
         self._window = window_sec
         self._requests: deque[tuple[float, int]] = deque()
+        self._lock = threading.Lock()
 
     def record(self, weight: int = 1) -> None:
-        now = time.time()
-        self._requests.append((now, weight))
-        self._cleanup(now)
+        with self._lock:
+            now = time.time()
+            self._requests.append((now, weight))
+            self._cleanup(now)
 
     def _cleanup(self, now: float) -> None:
         cutoff = now - self._window
@@ -49,18 +52,23 @@ class RateLimiter:
             self._requests.popleft()
 
     def current_usage(self) -> int:
-        self._cleanup(time.time())
-        return sum(w for _, w in self._requests)
-
-    def should_throttle(self, threshold: float = 0.8) -> bool:
-        return self.current_usage() > self._max * threshold
+        with self._lock:
+            self._cleanup(time.time())
+            return sum(w for _, w in self._requests)
 
     def wait_if_needed(self, weight: int = 1) -> None:
         """如果接近限速阈值，等到窗口释放足够额度。"""
-        while self.should_throttle():
-            logger.warning("接近限速阈值 (%d/%d)，暂停 0.5s", self.current_usage(), self._max)
+        threshold = self._max * 0.8
+        while True:
+            with self._lock:
+                now = time.time()
+                self._cleanup(now)
+                usage = sum(w for _, w in self._requests)
+                if usage <= threshold:
+                    self._requests.append((now, weight))
+                    return
+            logger.warning("接近限速阈值 (%d/%d)，暂停 0.5s", usage, self._max)
             time.sleep(0.5)
-        self.record(weight)
 
 
 def _fmt_decimal(value: float, precision: int = 8) -> str:
@@ -363,28 +371,19 @@ class BinanceAdapter(ExchangeAdapter):
     # ── 账户持仓查询 ──────────────────────────────────────────
 
     def get_spot_balance(self, asset: str) -> float:
-        """查询现货余额，同时检查统一账户(papi)和普通现货钱包。
-
-        注意：Portfolio Margin 模式下，现货余额可能已包含在 papi 返回中，
-        此时两处相加可能导致重复计算。请根据实际账户类型确认。
-        """
-        total = 0.0
-
-        # 1) 统一账户 (Portfolio Margin)
-        self._spot_limiter.wait_if_needed(weight=20)
+        """查询现货余额，优先统一账户(papi)，失败时回退普通现货钱包。"""
+        # 1) 统一账户 (Portfolio Margin) 优先；成功即直接返回，避免与 spot 钱包重复统计。
         try:
+            self._spot_limiter.wait_if_needed(weight=20)
             resp = self._papi_request("GET", "/papi/v1/balance", {"asset": asset})
             if isinstance(resp, list):
                 for item in resp:
                     if item.get("asset") == asset:
-                        total += float(item.get("crossMarginFree", 0))
-                        total += float(item.get("crossMarginLocked", 0))
-                        break
-            else:
-                total += float(resp.get("crossMarginFree", 0))
-                total += float(resp.get("crossMarginLocked", 0))
+                        return float(item.get("crossMarginFree", 0)) + float(item.get("crossMarginLocked", 0))
+                return 0.0
+            return float(resp.get("crossMarginFree", 0)) + float(resp.get("crossMarginLocked", 0))
         except Exception:
-            logger.exception("查询统一账户余额失败: asset=%s", asset)
+            logger.warning("查询统一账户余额失败，回退普通现货钱包: asset=%s", asset)
 
         # 2) 普通现货钱包 (/api/v3/account)
         try:
@@ -392,13 +391,11 @@ class BinanceAdapter(ExchangeAdapter):
             account = self.spot.account()
             for b in account.get("balances", []):
                 if b.get("asset") == asset:
-                    total += float(b.get("free", 0))
-                    total += float(b.get("locked", 0))
-                    break
+                    return float(b.get("free", 0)) + float(b.get("locked", 0))
+            return 0.0
         except Exception:
             logger.exception("查询普通现货余额失败: asset=%s", asset)
-
-        return total if total >= 0 else -1.0
+            return -1.0
 
     def get_earn_balance(self, asset: str) -> float:
         """查询活期理财余额（Simple Earn Flexible）。"""

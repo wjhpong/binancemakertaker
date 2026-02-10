@@ -1,13 +1,31 @@
+# ── 账户配置 ──
+active_account: main    # 当前使用的账户名
+
+accounts:
+  main:
+    label: "主账户"
+    api_key_env: BINANCE_API_KEY
+    api_secret_env: BINANCE_API_SECRET
+    total_budget: 4000
+
+  sub1:
+    label: "子账户1"
+    api_key_env: BINANCE_API_KEY_2
+    api_secret_env: BINANCE_API_SECRET_2
+    total_budget: 6000
+
+# ── 费率（所有账户共享）──
 fee:
   spot_maker: 0.000675      # VIP2 maker 0.09% × BNB 75% = 0.0675%
   fut_taker: 0.00036        # VIP2 taker 0.04% × BNB 90% = 0.036%
   min_spread_bps: -18       # 最小spread门槛 (bps)，可为负
 
+# ── 策略（所有账户共享，total_budget 在 accounts 中单独配置）──
 strategy:
   symbol_spot: ASTERUSDT
   symbol_fut: ASTERUSDT
   tick_size_spot: 0.001     # 现货最小价格变动
-  total_budget: 4000        # 总预算（币数量）
+  total_budget: 4000        # 向后兼容：无 accounts 段时使用此值
   budget_pct: 0.01          # 单笔不超过总预算的 1%
   depth_ratio: 0.3          # 单笔不超过该档深度的 30%
   min_order_qty: 1          # 最小下单量 (ASTER) — 合约最小1

@@ -25,6 +25,92 @@ import time
 
 SSH_HOST = "tixian"  # ~/.ssh/config 中定义的 EC2 host
 SOCK_PATH = "/tmp/arb-bot.sock"
+REMOTE_CONFIG = "/home/ubuntu/arbitrage-bot/config.yaml"
+
+
+def _read_remote_accounts() -> list[dict]:
+    """通过 SSH 读取远程 config.yaml 的账户列表。
+
+    Returns:
+        [{"name": "main", "label": "主账户", "budget": 4000, "active": True}, ...]
+    """
+    try:
+        result = subprocess.run(
+            ["ssh", SSH_HOST, f"cat {REMOTE_CONFIG}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        import yaml
+        raw = yaml.safe_load(result.stdout)
+        if not isinstance(raw, dict):
+            return []
+        accounts_raw = raw.get("accounts")
+        if not accounts_raw or not isinstance(accounts_raw, dict):
+            return []
+        active = raw.get("active_account", "")
+        accounts = []
+        for name, acct in accounts_raw.items():
+            accounts.append({
+                "name": name,
+                "label": acct.get("label", name),
+                "budget": acct.get("total_budget", 0),
+                "active": name == active,
+            })
+        return accounts
+    except Exception:
+        return []
+
+
+def _set_remote_active_account(account_name: str) -> bool:
+    """通过 SSH sed 修改远程 config.yaml 的 active_account 字段。"""
+    remote_cmd = (
+        f"cd /home/ubuntu/arbitrage-bot && "
+        f"sed -i 's/^active_account: .*/active_account: {account_name}/' config.yaml && "
+        f"echo OK"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", SSH_HOST, remote_cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "OK" in result.stdout
+    except Exception:
+        return False
+
+
+def _select_account() -> str | None:
+    """让用户选择账户，返回账户名；返回 None 表示取消。"""
+    accounts = _read_remote_accounts()
+    if not accounts:
+        print("  ⚠ 无法读取账户列表，将使用默认账户")
+        return ""  # 空字符串表示使用 config.yaml 中的默认值
+
+    if len(accounts) == 1:
+        acct = accounts[0]
+        print(f"  仅一个账户: {acct['label']} (预算 {acct['budget']} 币)")
+        return acct["name"]
+
+    print("  请选择账户:")
+    for i, acct in enumerate(accounts, 1):
+        marker = " ← 当前" if acct["active"] else ""
+        print(f"    {i}. {acct['label']} (预算 {acct['budget']} 币){marker}")
+
+    try:
+        choice_str = input(f"  请选择 [1-{len(accounts)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    try:
+        idx = int(choice_str) - 1
+        if 0 <= idx < len(accounts):
+            return accounts[idx]["name"]
+    except ValueError:
+        pass
+
+    print("  无效选择")
+    return None
 
 
 def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
@@ -94,6 +180,10 @@ def print_resp(resp: dict) -> None:
             direction = "开仓（买入）"
 
         symbol = resp.get("symbol", "未知")
+        acct_label = resp.get("account_label", "")
+        acct_name = resp.get("account_name", "")
+        if acct_label:
+            print(f"账户: {acct_label} ({acct_name})")
         print(f"代币: {symbol}")
         print(f"状态: {state}")
         print(f"当前方向: {direction}")
@@ -264,6 +354,20 @@ def interactive() -> None:
                 break
 
             if d == "a":
+                # 检查机器人是否在运行；未运行时先选账户再启动
+                _test = send_cmd("status")
+                if not _test.get("ok"):
+                    # 机器人未运行，需要选账户 → 写入配置 → 启动服务
+                    acct_name = _select_account()
+                    if acct_name is None:
+                        _print_menu()
+                        continue
+                    if acct_name:
+                        if not _set_remote_active_account(acct_name):
+                            print("⚠ 修改账户失败，将使用默认账户")
+                        else:
+                            print(f"  已选择账户: {acct_name}")
+
                 try:
                     qty = input("请输入本次开仓预算（币数量，直接回车=不修改）: ").strip()
                 except (EOFError, KeyboardInterrupt):

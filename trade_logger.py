@@ -15,12 +15,14 @@ _DEFAULT_DB = Path(__file__).resolve().parent / "trades.db"
 
 
 class TradeLogger:
-    def __init__(self, db_path: str | Path = _DEFAULT_DB) -> None:
+    def __init__(self, db_path: str | Path = _DEFAULT_DB, account: str = "") -> None:
+        self._account = account
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
-        logger.info("TradeLogger 初始化完成: %s", db_path)
+        self._migrate()
+        logger.info("TradeLogger 初始化完成: %s (account=%s)", db_path, account or "default")
 
     def _create_tables(self) -> None:
         self.conn.execute("""
@@ -32,19 +34,29 @@ class TradeLogger:
                 order_id  TEXT    NOT NULL,
                 price     REAL,
                 qty       REAL    NOT NULL,
-                status    TEXT    NOT NULL
+                status    TEXT    NOT NULL,
+                account   TEXT    NOT NULL DEFAULT ''
             )
         """)
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """向后兼容：旧数据库可能没有 account 列，自动添加。"""
+        cursor = self.conn.execute("PRAGMA table_info(trades)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        if "account" not in columns:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN account TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+            logger.info("已自动迁移: trades 表新增 account 列")
 
     # ── 写入 ──
 
     def log_spot_order(self, symbol: str, order_id: str, price: float, qty: float) -> None:
         with self._lock:
             self.conn.execute(
-                "INSERT INTO trades (timestamp, side, symbol, order_id, price, qty, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (time.time(), "spot_buy", symbol, order_id, price, qty, "placed"),
+                "INSERT INTO trades (timestamp, side, symbol, order_id, price, qty, status, account) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), "spot_buy", symbol, order_id, price, qty, "placed", self._account),
             )
             self.conn.commit()
 
@@ -52,9 +64,9 @@ class TradeLogger:
         """记录现货买单成交。"""
         with self._lock:
             self.conn.execute(
-                "INSERT INTO trades (timestamp, side, symbol, order_id, price, qty, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (time.time(), "spot_buy", symbol, order_id, fill_price, fill_qty, "filled"),
+                "INSERT INTO trades (timestamp, side, symbol, order_id, price, qty, status, account) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), "spot_buy", symbol, order_id, fill_price, fill_qty, "filled", self._account),
             )
             self.conn.commit()
 
@@ -70,9 +82,9 @@ class TradeLogger:
         status = "hedge_ok" if success else "hedge_fail"
         with self._lock:
             self.conn.execute(
-                "INSERT INTO trades (timestamp, side, symbol, order_id, price, qty, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (time.time(), "futures_sell", symbol, order_id, price, qty, status),
+                "INSERT INTO trades (timestamp, side, symbol, order_id, price, qty, status, account) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), "futures_sell", symbol, order_id, price, qty, status, self._account),
             )
             self.conn.commit()
 

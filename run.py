@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """启动入口 —— 加载配置、初始化组件、信号处理、优雅退出。
 远程控制通过 ctl.py + Unix socket 实现。
+
+用法:
+    python run.py                    # 使用 config.yaml 中的 active_account
+    python run.py main               # 指定账户名
+    python run.py main 5000          # 指定账户名 + 覆盖预算
 """
 
 from __future__ import annotations
@@ -29,19 +34,24 @@ def main() -> None:
         handlers=[logging.StreamHandler()],
     )
 
-    # ── 命令行参数：可选覆盖总预算 ──
+    # ── 命令行参数：[账户名] [总预算覆盖] ──
+    account_name_arg = None
     budget_override = None
-    if len(sys.argv) > 1:
+    args = sys.argv[1:]
+    for arg in args:
         try:
-            budget_override = float(sys.argv[1])
-            logger.info("命令行指定总预算: %.6f 币", budget_override)
+            budget_override = float(arg)
         except ValueError:
-            print("用法: python run.py [总预算币数量]  例如: python run.py 8000")
-            sys.exit(1)
+            account_name_arg = arg
+
+    if account_name_arg:
+        logger.info("命令行指定账户: %s", account_name_arg)
+    if budget_override is not None:
+        logger.info("命令行指定总预算: %.6f 币", budget_override)
 
     # ── 加载配置 ──
     try:
-        api_key, api_secret, fee, cfg, log_config = load_config()
+        account, fee, cfg, log_config = load_config(account_name=account_name_arg)
     except ConfigError as exc:
         logger.error("配置加载失败: %s", exc)
         sys.exit(1)
@@ -59,6 +69,7 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("同所做市套利机器人启动")
+    logger.info("账户: %s (%s)", account.name, account.label)
     logger.info("symbol_spot=%s | symbol_fut=%s",
                 cfg.symbol_spot, cfg.symbol_fut)
     logger.info("maker费=%.4f%% | taker费=%.4f%% | 最小spread=%.4fbps",
@@ -75,20 +86,21 @@ def main() -> None:
     notifier = None
     if feishu_webhook:
         notifier = FeishuNotifier(feishu_webhook)
+        notifier.account_label = account.label
         logger.info("飞书通知已启用")
 
     # ── 初始化组件 ──
-    trade_log = TradeLogger()
+    trade_log = TradeLogger(account=account.name)
 
     ws = WSManager(
         symbol=cfg.symbol_spot,
-        api_key=api_key,
+        api_key=account.api_key,
     )
     ws.start()
 
     adapter = BinanceAdapter(
-        api_key=api_key,
-        api_secret=api_secret,
+        api_key=account.api_key,
+        api_secret=account.api_secret,
         price_cache=ws.price_cache,
     )
 
@@ -135,7 +147,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
 
     # ── 控制服务器（Unix socket，供 ctl.py 远程控制） ──
-    ctrl = ControlServer(bot)
+    ctrl = ControlServer(bot, account_name=account.name, account_label=account.label)
     ctrl.start()
 
     # ── 运行 ──
