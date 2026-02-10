@@ -91,26 +91,44 @@ class TradeLogger:
     # ── 查询 ──
 
     def get_recent_trades(self, limit: int = 20) -> list[dict]:
-        """返回最近 N 条交易记录。"""
+        """返回最近 N 条交易记录（按当前账户过滤）。"""
         with self._lock:
-            cursor = self.conn.execute(
-                "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)
-            )
+            if self._account:
+                cursor = self.conn.execute(
+                    "SELECT * FROM trades WHERE account = ? ORDER BY id DESC LIMIT ?",
+                    (self._account, limit),
+                )
+            else:
+                cursor = self.conn.execute(
+                    "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)
+                )
             return [dict(row) for row in cursor.fetchall()]
 
     def get_pnl_summary(self) -> dict:
-        """统计简要 P&L：总买入量、总对冲量、成功/失败次数。"""
+        """统计简要 P&L：总买入量、总对冲量、成功/失败次数（按当前账户过滤）。"""
         with self._lock:
-            cursor = self.conn.execute("""
-                SELECT
-                    SUM(CASE WHEN side='spot_buy' AND status='filled' THEN qty ELSE 0 END) as total_bought,
-                    SUM(CASE WHEN side='spot_buy' AND status='filled' THEN price * qty ELSE 0 END) as total_buy_cost,
-                    SUM(CASE WHEN side='futures_sell' AND status='hedge_ok' THEN qty ELSE 0 END) as total_hedged,
-                    SUM(CASE WHEN side='futures_sell' AND status='hedge_ok' THEN price * qty ELSE 0 END) as total_hedge_revenue,
-                    SUM(CASE WHEN status='hedge_ok' THEN 1 ELSE 0 END) as hedge_ok_count,
-                    SUM(CASE WHEN status='hedge_fail' THEN 1 ELSE 0 END) as hedge_fail_count
-                FROM trades
-            """)
+            if self._account:
+                cursor = self.conn.execute("""
+                    SELECT
+                        SUM(CASE WHEN side='spot_buy' AND status='filled' THEN qty ELSE 0 END) as total_bought,
+                        SUM(CASE WHEN side='spot_buy' AND status='filled' THEN price * qty ELSE 0 END) as total_buy_cost,
+                        SUM(CASE WHEN side='futures_sell' AND status='hedge_ok' THEN qty ELSE 0 END) as total_hedged,
+                        SUM(CASE WHEN side='futures_sell' AND status='hedge_ok' THEN price * qty ELSE 0 END) as total_hedge_revenue,
+                        SUM(CASE WHEN status='hedge_ok' THEN 1 ELSE 0 END) as hedge_ok_count,
+                        SUM(CASE WHEN status='hedge_fail' THEN 1 ELSE 0 END) as hedge_fail_count
+                    FROM trades WHERE account = ?
+                """, (self._account,))
+            else:
+                cursor = self.conn.execute("""
+                    SELECT
+                        SUM(CASE WHEN side='spot_buy' AND status='filled' THEN qty ELSE 0 END) as total_bought,
+                        SUM(CASE WHEN side='spot_buy' AND status='filled' THEN price * qty ELSE 0 END) as total_buy_cost,
+                        SUM(CASE WHEN side='futures_sell' AND status='hedge_ok' THEN qty ELSE 0 END) as total_hedged,
+                        SUM(CASE WHEN side='futures_sell' AND status='hedge_ok' THEN price * qty ELSE 0 END) as total_hedge_revenue,
+                        SUM(CASE WHEN status='hedge_ok' THEN 1 ELSE 0 END) as hedge_ok_count,
+                        SUM(CASE WHEN status='hedge_fail' THEN 1 ELSE 0 END) as hedge_fail_count
+                    FROM trades
+                """)
             row = cursor.fetchone()
         total_buy = row["total_buy_cost"] or 0.0
         total_sell = row["total_hedge_revenue"] or 0.0

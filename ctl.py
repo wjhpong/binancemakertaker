@@ -64,6 +64,9 @@ def _read_remote_accounts() -> list[dict]:
 
 def _set_remote_active_account(account_name: str) -> bool:
     """通过 SSH sed 修改远程 config.yaml 的 active_account 字段。"""
+    if not account_name.replace("_", "").replace("-", "").isalnum():
+        print(f"  ⚠ 账户名包含非法字符: {account_name}")
+        return False
     remote_cmd = (
         f"cd /home/ubuntu/arbitrage-bot && "
         f"sed -i 's/^active_account: .*/active_account: {account_name}/' config.yaml && "
@@ -301,6 +304,7 @@ _MENU = [
     ("停止机器人", "stop", []),
     ("修改Spread", None, []),       # 需要额外输入 bps
     ("修改代币", None, []),          # 切换交易对
+    ("切换账户", None, []),          # 切换账户并重启
     ("退出", None, []),
 ]
 
@@ -354,20 +358,6 @@ def interactive() -> None:
                 break
 
             if d == "a":
-                # 检查机器人是否在运行；未运行时先选账户再启动
-                _test = send_cmd("status")
-                if not _test.get("ok"):
-                    # 机器人未运行，需要选账户 → 写入配置 → 启动服务
-                    acct_name = _select_account()
-                    if acct_name is None:
-                        _print_menu()
-                        continue
-                    if acct_name:
-                        if not _set_remote_active_account(acct_name):
-                            print("⚠ 修改账户失败，将使用默认账户")
-                        else:
-                            print(f"  已选择账户: {acct_name}")
-
                 try:
                     qty = input("请输入本次开仓预算（币数量，直接回车=不修改）: ").strip()
                 except (EOFError, KeyboardInterrupt):
@@ -615,6 +605,33 @@ def interactive() -> None:
             except Exception as e:
                 print(f"⚠ 操作失败: {e}")
 
+            _print_menu()
+            continue
+
+        # 切换账户
+        if choice == 11:
+            acct_name = _select_account()
+            if acct_name is None:
+                _print_menu()
+                continue
+            if not acct_name:
+                # 无法读取账户列表
+                _print_menu()
+                continue
+            if not _set_remote_active_account(acct_name):
+                print("⚠ 修改账户配置失败")
+                _print_menu()
+                continue
+            print(f"已切换到账户: {acct_name}，正在重启机器人服务...")
+            try:
+                subprocess.run(
+                    ["ssh", SSH_HOST, "sudo systemctl restart arb-bot"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                time.sleep(3)
+                print("✅ 机器人已重启，账户切换生效")
+            except subprocess.TimeoutExpired:
+                print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
             _print_menu()
             continue
 

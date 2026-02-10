@@ -3,16 +3,16 @@ active_account: main    # 当前使用的账户名
 
 accounts:
   main:
-    label: "主账户"
+    label: "dennis"
     api_key_env: BINANCE_API_KEY
     api_secret_env: BINANCE_API_SECRET
     total_budget: 4000
 
-  sub1:
-    label: "子账户1"
-    api_key_env: BINANCE_API_KEY_2
-    api_secret_env: BINANCE_API_SECRET_2
-    total_budget: 6000
+  eb65:
+    label: "eb65"
+    api_key_env: BINANCE_API_KEY_EB65
+    api_secret_env: BINANCE_API_SECRET_EB65
+    total_budget: 4000
 
 # ── 费率（所有账户共享）──
 fee:

@@ -371,31 +371,37 @@ class BinanceAdapter(ExchangeAdapter):
     # ── 账户持仓查询 ──────────────────────────────────────────
 
     def get_spot_balance(self, asset: str) -> float:
-        """查询现货余额，优先统一账户(papi)，失败时回退普通现货钱包。"""
-        # 1) 统一账户 (Portfolio Margin) 优先；成功即直接返回，避免与 spot 钱包重复统计。
+        """查询现货余额，优先统一账户(papi)，为 0 或失败时回退普通现货钱包。"""
+        # 1) 统一账户 (Portfolio Margin) 优先
+        papi_bal = 0.0
         try:
             self._spot_limiter.wait_if_needed(weight=20)
             resp = self._papi_request("GET", "/papi/v1/balance", {"asset": asset})
             if isinstance(resp, list):
                 for item in resp:
                     if item.get("asset") == asset:
-                        return float(item.get("crossMarginFree", 0)) + float(item.get("crossMarginLocked", 0))
-                return 0.0
-            return float(resp.get("crossMarginFree", 0)) + float(resp.get("crossMarginLocked", 0))
+                        papi_bal = float(item.get("crossMarginFree", 0)) + float(item.get("crossMarginLocked", 0))
+                        break
+            else:
+                papi_bal = float(resp.get("crossMarginFree", 0)) + float(resp.get("crossMarginLocked", 0))
+            if papi_bal > 0:
+                return papi_bal
         except Exception:
             logger.warning("查询统一账户余额失败，回退普通现货钱包: asset=%s", asset)
 
-        # 2) 普通现货钱包 (/api/v3/account)
+        # 2) 普通现货钱包 (/api/v3/account) —— papi 为 0 或失败时兜底
         try:
             self._spot_limiter.wait_if_needed(weight=20)
             account = self.spot.account()
             for b in account.get("balances", []):
                 if b.get("asset") == asset:
-                    return float(b.get("free", 0)) + float(b.get("locked", 0))
-            return 0.0
+                    spot_bal = float(b.get("free", 0)) + float(b.get("locked", 0))
+                    if spot_bal > 0:
+                        return spot_bal
+            return papi_bal  # 都是 0，返回 papi 的值
         except Exception:
             logger.exception("查询普通现货余额失败: asset=%s", asset)
-            return -1.0
+            return papi_bal if papi_bal > 0 else -1.0
 
     def get_earn_balance(self, asset: str) -> float:
         """查询活期理财余额（Simple Earn Flexible）。"""

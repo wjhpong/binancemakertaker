@@ -239,15 +239,20 @@ class FillHandler:
         now2 = time.time()
         if now2 - self._last_gap_check_ts >= 30.0:
             self._last_gap_check_ts = now2
-            gap = self.total_filled_base - self.total_hedged_base - self.naked_exposure
+            need_hedge_gap = False
+            with self._state_guard():
+                gap = self.total_filled_base - self.total_hedged_base - self.naked_exposure
+                if gap >= self.cfg.lot_size:
+                    self.naked_exposure += gap
+                    need_hedge_gap = True
             if gap >= self.cfg.lot_size:
                 logger.warning(
                     "[GAP] 发现对冲缺口: filled=%.4f, hedged=%.4f, naked=%.4f, gap=%.4f → 补充对冲",
                     self.total_filled_base, self.total_hedged_base,
                     self.naked_exposure, gap,
                 )
-                self.naked_exposure += gap
-                self.try_hedge(0)  # qty=0，靠 naked_exposure 驱动对冲
+                if need_hedge_gap:
+                    self.try_hedge(0)  # qty=0，靠 naked_exposure 驱动对冲
             elif gap < -self.cfg.lot_size:
                 logger.warning(
                     "[GAP] 发现超额对冲: filled=%.4f, hedged=%.4f, naked=%.4f, gap=%.4f（已多对冲，记录告警）",

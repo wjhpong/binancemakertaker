@@ -93,6 +93,10 @@ class ControlServer:
         bot = self.bot
 
         if cmd == "start":
+            with bot._close_task_lock:
+                close_running = bot._close_task_running
+            if close_running:
+                return {"ok": False, "msg": "平仓任务进行中，禁止恢复开仓"}
             reset_done = False
             reset_hint = ""
             if args:
