@@ -3,6 +3,7 @@
 
 用法:
     python ctl.py status
+    python ctl.py spread_info     # 查看实时价差率
     python ctl.py start
     python ctl.py start 10000
     python ctl.py pause
@@ -60,6 +61,40 @@ def _read_remote_accounts() -> list[dict]:
         return accounts
     except Exception:
         return []
+
+
+def _read_remote_exchange() -> str:
+    """通过 SSH 读取远程 config.yaml 的 exchange 字段。"""
+    try:
+        result = subprocess.run(
+            ["ssh", SSH_HOST, f"grep '^exchange:' {REMOTE_CONFIG}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split(":")[-1].strip()
+    except Exception:
+        pass
+    return "binance"
+
+
+def _set_remote_exchange(exchange: str) -> bool:
+    """通过 SSH sed 修改远程 config.yaml 的 exchange 字段。"""
+    if exchange not in ("binance", "aster"):
+        print(f"  ⚠ 不支持的交易所: {exchange}")
+        return False
+    remote_cmd = (
+        f"cd /home/ubuntu/arbitrage-bot && "
+        f"sed -i 's/^exchange: .*/exchange: {exchange}/' config.yaml && "
+        f"echo OK"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", SSH_HOST, remote_cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "OK" in result.stdout
+    except Exception:
+        return False
 
 
 def _set_remote_active_account(account_name: str) -> bool:
@@ -183,8 +218,11 @@ def print_resp(resp: dict) -> None:
             direction = "开仓（买入）"
 
         symbol = resp.get("symbol", "未知")
+        exchange_name = resp.get("exchange", "")
         acct_label = resp.get("account_label", "")
         acct_name = resp.get("account_name", "")
+        if exchange_name:
+            print(f"交易所: {exchange_name}")
         if acct_label:
             print(f"账户: {acct_label} ({acct_name})")
         print(f"代币: {symbol}")
@@ -287,6 +325,37 @@ def print_resp(resp: dict) -> None:
             print("  永续合约: 查询失败")
 
 
+    elif "open_levels" in resp:
+        # spread_info 响应 —— 根据当前方向只显示对应的 spread
+        symbol = resp.get("symbol", "?")
+        fut_bid = resp.get("fut_bid", 0)
+        fut_ask = resp.get("fut_ask", 0)
+        min_bps = resp.get("min_spread_bps", 0)
+        direction = resp.get("direction", "open")
+
+        print(f"代币: {symbol}  |  门槛: {min_bps:.2f}bp  |  方向: {'平仓' if direction == 'close' else '开仓'}")
+
+        if direction == "close":
+            # ── 平仓方向: -A+B (卖现货ask1 + 买永续ask1)
+            close_levels = resp.get("close_levels", [])
+            if close_levels:
+                lv = close_levels[0]
+                s = lv["spread_bps"]
+                mark = "✓" if s >= min_bps else "✗"
+                print(f"平仓 -A+B: 卖一 {lv['price']:.6f} / 永续Ask {fut_ask:.6f}  spread: {s:+.2f}bp  {mark}")
+            else:
+                print("平仓 -A+B: 无行情")
+        else:
+            # ── 开仓方向: +A-B (买现货bid1 + 卖永续bid1)
+            open_levels = resp.get("open_levels", [])
+            if open_levels:
+                lv = open_levels[0]
+                s = lv["spread_bps"]
+                mark = "✓" if s >= min_bps else "✗"
+                print(f"开仓 +A-B: 买一 {lv['price']:.6f} / 永续Bid {fut_bid:.6f}  spread: {s:+.2f}bp  {mark}")
+            else:
+                print("开仓 +A-B: 无行情")
+
     elif "budget" in resp and "paused" not in resp:
         print(f"预算: {resp['used']:.6f} / {resp['budget']:.6f} 币 (剩余 {resp['remaining']:.6f} 币)")
     elif "min_spread_bps" in resp:
@@ -295,6 +364,7 @@ def print_resp(resp: dict) -> None:
 
 _MENU = [
     ("查看状态", "status", []),
+    ("查看价差", "spread_info", []),  # 实时价差率
     ("开始挂单", None, []),         # 选方向：开仓 / 平仓
     ("暂停", None, []),             # 智能暂停：开仓→暂停开仓，平仓→暂停平仓
     ("恢复", None, []),             # 智能恢复：开仓→恢复开仓，平仓→恢复平仓
@@ -305,6 +375,7 @@ _MENU = [
     ("修改Spread", None, []),       # 需要额外输入 bps
     ("修改代币", None, []),          # 切换交易对
     ("切换账户", None, []),          # 切换账户并重启
+    ("切换交易所", None, []),        # 切换 binance / aster
     ("退出", None, []),
 ]
 
@@ -347,8 +418,14 @@ def interactive() -> None:
         if choice == len(_MENU):
             break
 
-        # 开始挂单 —— 选方向
+        # 查看价差 —— 持续刷新
         if choice == 2:
+            _watch_spread()
+            _print_menu()
+            continue
+
+        # 开始挂单 —— 选方向
+        if choice == 3:
             try:
                 print("  a. 开仓（买入）")
                 print("  b. 平仓（卖出）")
@@ -409,7 +486,7 @@ def interactive() -> None:
             continue
 
         # 暂停 —— 先查状态判断方向
-        if choice == 3:
+        if choice == 4:
             status = send_cmd("status")
             close_task = (status.get("close_task") or {})
             is_paused = status.get("paused", False)
@@ -427,7 +504,7 @@ def interactive() -> None:
             continue
 
         # 恢复 —— 先查状态判断方向
-        if choice == 4:
+        if choice == 5:
             status = send_cmd("status")
             close_task = (status.get("close_task") or {})
             if close_task.get("running"):
@@ -439,7 +516,7 @@ def interactive() -> None:
             continue
 
         # 终止 —— 先查状态判断方向
-        if choice == 5:
+        if choice == 6:
             status = send_cmd("status")
             close_task = (status.get("close_task") or {})
             is_paused = status.get("paused", False)
@@ -514,7 +591,7 @@ def interactive() -> None:
             continue
 
         # 修改数量
-        if choice == 7:
+        if choice == 8:
             try:
                 amt = input("请输入新数量（币数量）: ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -528,7 +605,7 @@ def interactive() -> None:
             continue
 
         # 修改 spread(bps)
-        if choice == 9:
+        if choice == 10:
             try:
                 bps = input("请输入最小spread(bps): ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -542,7 +619,7 @@ def interactive() -> None:
             continue
 
         # 修改代币
-        if choice == 10:
+        if choice == 11:
             # 读取当前 symbol
             try:
                 result = subprocess.run(
@@ -609,7 +686,7 @@ def interactive() -> None:
             continue
 
         # 切换账户
-        if choice == 11:
+        if choice == 12:
             acct_name = _select_account()
             if acct_name is None:
                 _print_menu()
@@ -635,17 +712,107 @@ def interactive() -> None:
             _print_menu()
             continue
 
+        # 切换交易所
+        if choice == 13:
+            current_ex = _read_remote_exchange()
+            print(f"  当前交易所: {current_ex}")
+            exchanges = ["binance", "aster"]
+            for i, ex in enumerate(exchanges, 1):
+                mark = " ← 当前" if ex == current_ex else ""
+                print(f"    {i}. {ex}{mark}")
+            try:
+                sel = input("选择交易所 [1-2，直接回车取消]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not sel:
+                _print_menu()
+                continue
+            try:
+                idx = int(sel) - 1
+                if idx < 0 or idx >= len(exchanges):
+                    raise ValueError
+                new_exchange = exchanges[idx]
+            except ValueError:
+                print("  ⚠ 无效选择")
+                _print_menu()
+                continue
+            if new_exchange == current_ex:
+                print(f"  已经是 {new_exchange}，无需切换")
+                _print_menu()
+                continue
+            if not _set_remote_exchange(new_exchange):
+                print("⚠ 修改交易所配置失败")
+                _print_menu()
+                continue
+            print(f"已切换到交易所: {new_exchange}，正在重启机器人服务...")
+            try:
+                subprocess.run(
+                    ["ssh", SSH_HOST, "sudo systemctl restart arb-bot"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                time.sleep(3)
+                print(f"✅ 机器人已重启，交易所切换到 {new_exchange}")
+            except subprocess.TimeoutExpired:
+                print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
+            _print_menu()
+            continue
+
         resp = send_cmd(cmd, args)
         print_resp(resp)
         _print_menu()
+
+
+def _watch_spread(interval: float = 1.0) -> None:
+    """持续刷新 spread，Ctrl+C 退出。"""
+    print(f"持续刷新 spread（每 {interval:.0f}s），Ctrl+C 退出\n")
+    try:
+        while True:
+            resp = send_cmd("spread_info")
+            # 单行覆盖刷新：\r 回到行首，清行后打印
+            if "open_levels" in resp:
+                symbol = resp.get("symbol", "?")
+                fut_bid = resp.get("fut_bid", 0)
+                fut_ask = resp.get("fut_ask", 0)
+                min_bps = resp.get("min_spread_bps", 0)
+                direction = resp.get("direction", "open")
+                if direction == "close":
+                    levels = resp.get("close_levels", [])
+                    if levels:
+                        lv = levels[0]
+                        s = lv["spread_bps"]
+                        mark = "✓" if s >= min_bps else "✗"
+                        line = (f"{symbol} 平仓 | 卖一 {lv['price']:.6f} / "
+                                f"永续Ask {fut_ask:.6f} | spread: {s:+.2f}bp {mark} | 门槛: {min_bps:.2f}bp")
+                    else:
+                        line = f"{symbol} 平仓 | 无行情"
+                else:
+                    levels = resp.get("open_levels", [])
+                    if levels:
+                        lv = levels[0]
+                        s = lv["spread_bps"]
+                        mark = "✓" if s >= min_bps else "✗"
+                        line = (f"{symbol} 开仓 | 买一 {lv['price']:.6f} / "
+                                f"永续Bid {fut_bid:.6f} | spread: {s:+.2f}bp {mark} | 门槛: {min_bps:.2f}bp")
+                    else:
+                        line = f"{symbol} 开仓 | 无行情"
+            else:
+                line = resp.get("msg", "查询失败")
+            print(f"\r\033[K{line}", end="", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print()  # 换行
 
 
 def main() -> None:
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
         args = sys.argv[2:]
-        resp = send_cmd(cmd, args)
-        print_resp(resp)
+        if cmd == "spread_info":
+            _watch_spread()
+        else:
+            resp = send_cmd(cmd, args)
+            print_resp(resp)
     else:
         interactive()
 

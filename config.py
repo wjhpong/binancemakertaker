@@ -140,11 +140,15 @@ def load_config(
         max_retry=int(strat_raw.get("max_retry", 3)),
     )
 
+    # 交易所
+    exchange = raw.get("exchange", "binance").lower()
+
     # 日志
     log_raw = raw.get("logging", {})
     log_config = {
         "level": log_raw.get("level", "INFO"),
         "file": log_raw.get("file", "arbitrage.log"),
+        "exchange": exchange,
     }
 
     return account, fee, cfg, log_config

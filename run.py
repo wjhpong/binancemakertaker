@@ -16,12 +16,10 @@ import sys
 from dataclasses import replace
 
 from arbitrage_bot import SpotFuturesArbitrageBot
-from binance_adapter import BinanceAdapter
 from config import ConfigError, load_config
 from control_server import ControlServer
 from feishu_notifier import FeishuNotifier
 from trade_logger import TradeLogger
-from ws_manager import WSManager
 
 logger = logging.getLogger("run")
 
@@ -67,8 +65,11 @@ def main() -> None:
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root.addHandler(file_handler)
 
+    exchange = log_config.get("exchange", "binance")
+
     logger.info("=" * 60)
     logger.info("同所做市套利机器人启动")
+    logger.info("交易所: %s", exchange)
     logger.info("账户: %s (%s)", account.name, account.label)
     logger.info("symbol_spot=%s | symbol_fut=%s",
                 cfg.symbol_spot, cfg.symbol_fut)
@@ -92,17 +93,32 @@ def main() -> None:
     # ── 初始化组件 ──
     trade_log = TradeLogger(account=account.name)
 
-    ws = WSManager(
-        symbol=cfg.symbol_spot,
-        api_key=account.api_key,
-    )
-    ws.start()
-
-    adapter = BinanceAdapter(
-        api_key=account.api_key,
-        api_secret=account.api_secret,
-        price_cache=ws.price_cache,
-    )
+    if exchange == "aster":
+        from aster_ws_manager import AsterWSManager
+        from aster_adapter import AsterAdapter
+        ws = AsterWSManager(
+            symbol=cfg.symbol_spot,
+            api_key=account.api_key,
+        )
+        ws.start()
+        adapter = AsterAdapter(
+            api_key=account.api_key,
+            api_secret=account.api_secret,
+            price_cache=ws.price_cache,
+        )
+    else:
+        from ws_manager import WSManager
+        from binance_adapter import BinanceAdapter
+        ws = WSManager(
+            symbol=cfg.symbol_spot,
+            api_key=account.api_key,
+        )
+        ws.start()
+        adapter = BinanceAdapter(
+            api_key=account.api_key,
+            api_secret=account.api_secret,
+            price_cache=ws.price_cache,
+        )
 
     # 启动前校验交易对
     exchange_info = adapter.preflight_check(cfg.symbol_spot, cfg.symbol_fut)
@@ -147,7 +163,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
 
     # ── 控制服务器（Unix socket，供 ctl.py 远程控制） ──
-    ctrl = ControlServer(bot, account_name=account.name, account_label=account.label)
+    ctrl = ControlServer(bot, account_name=account.name, account_label=account.label, exchange=exchange)
     ctrl.start()
 
     # ── 运行 ──

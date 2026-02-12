@@ -26,10 +26,12 @@ class ControlServer:
         bot: SpotFuturesArbitrageBot,
         account_name: str = "",
         account_label: str = "",
+        exchange: str = "binance",
     ) -> None:
         self.bot = bot
         self._account_name = account_name
         self._account_label = account_label
+        self._exchange = exchange
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
@@ -194,6 +196,9 @@ class ControlServer:
             except ValueError:
                 return {"ok": False, "msg": "无效数字"}
 
+        elif cmd == "spread_info":
+            return bot.get_spread_snapshot()
+
         elif cmd == "finish_open":
             summary = bot.finish_open()
             summary["ok"] = True
@@ -211,6 +216,7 @@ class ControlServer:
             snap["ok"] = True
             snap["account_name"] = self._account_name
             snap["account_label"] = self._account_label
+            snap["exchange"] = self._exchange
             return snap
 
         else:

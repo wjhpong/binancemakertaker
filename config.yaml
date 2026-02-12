@@ -1,5 +1,6 @@
 # ── 账户配置 ──
 active_account: main    # 当前使用的账户名
+exchange: binance        # 交易所: binance | aster
 
 accounts:
   main:
@@ -12,6 +13,18 @@ accounts:
     label: "eb65"
     api_key_env: BINANCE_API_KEY_EB65
     api_secret_env: BINANCE_API_SECRET_EB65
+    total_budget: 4000
+
+  aster1:
+    label: "dennis-aster"
+    api_key_env: ASTER_API_KEY
+    api_secret_env: ASTER_API_SECRET
+    total_budget: 4000
+
+  aster-eb65:
+    label: "eb65-aster"
+    api_key_env: ASTER_API_KEY_EB65
+    api_secret_env: ASTER_API_SECRET_EB65
     total_budget: 4000
 
 # ── 费率（所有账户共享）──
