@@ -66,10 +66,14 @@ def main() -> None:
     root.addHandler(file_handler)
 
     exchange = log_config.get("exchange", "binance")
+    mode = log_config.get("mode", "single")
 
     logger.info("=" * 60)
-    logger.info("同所做市套利机器人启动")
-    logger.info("交易所: %s", exchange)
+    if mode == "cross":
+        logger.info("跨所套利机器人启动")
+    else:
+        logger.info("同所做市套利机器人启动")
+    logger.info("模式: %s | 交易所: %s", mode, exchange)
     logger.info("账户: %s (%s)", account.name, account.label)
     logger.info("symbol_spot=%s | symbol_fut=%s",
                 cfg.symbol_spot, cfg.symbol_fut)
@@ -92,8 +96,115 @@ def main() -> None:
 
     # ── 初始化组件 ──
     trade_log = TradeLogger(account=account.name)
+    ws_managers = []  # 跟踪所有 WS manager，用于退出时清理
 
-    if exchange == "aster":
+    if mode == "cross":
+        # ── 跨所模式：分别初始化现货端和合约端 ──
+        from cross_exchange_adapter import CrossExchangeAdapter
+        cross_cfg = log_config["cross_config"]
+
+        # — 现货端 —
+        if cross_cfg.spot_exchange == "gate":
+            from gate_ws_manager import GateWSManager
+            from gate_adapter import GateAdapter
+            spot_ws = GateWSManager(
+                symbol=cfg.symbol_spot,
+                api_key=cross_cfg.spot_account.api_key,
+                api_secret=cross_cfg.spot_account.api_secret,
+            )
+            spot_ws.start()
+            spot_adapter = GateAdapter(
+                api_key=cross_cfg.spot_account.api_key,
+                api_secret=cross_cfg.spot_account.api_secret,
+                price_cache=spot_ws.price_cache,
+            )
+            ws_managers.append(spot_ws)
+        elif cross_cfg.spot_exchange == "aster":
+            from aster_ws_manager import AsterWSManager
+            from aster_adapter import AsterAdapter
+            spot_ws = AsterWSManager(
+                symbol=cfg.symbol_spot,
+                api_key=cross_cfg.spot_account.api_key,
+            )
+            spot_ws.start()
+            spot_adapter = AsterAdapter(
+                api_key=cross_cfg.spot_account.api_key,
+                api_secret=cross_cfg.spot_account.api_secret,
+                price_cache=spot_ws.price_cache,
+            )
+            ws_managers.append(spot_ws)
+        elif cross_cfg.spot_exchange == "bitget":
+            from bitget_ws_manager import BitgetWSManager
+            from bitget_adapter import BitgetAdapter
+            spot_ws = BitgetWSManager(
+                symbol=cfg.symbol_spot,
+                api_key=cross_cfg.spot_account.api_key,
+                api_secret=cross_cfg.spot_account.api_secret,
+                passphrase=cross_cfg.spot_account.passphrase,
+            )
+            spot_ws.start()
+            spot_adapter = BitgetAdapter(
+                api_key=cross_cfg.spot_account.api_key,
+                api_secret=cross_cfg.spot_account.api_secret,
+                passphrase=cross_cfg.spot_account.passphrase,
+                price_cache=spot_ws.price_cache,
+            )
+            ws_managers.append(spot_ws)
+        else:  # binance
+            from ws_manager import WSManager
+            from binance_adapter import BinanceAdapter
+            spot_ws = WSManager(
+                symbol=cfg.symbol_spot,
+                api_key=cross_cfg.spot_account.api_key,
+            )
+            spot_ws.start()
+            spot_adapter = BinanceAdapter(
+                api_key=cross_cfg.spot_account.api_key,
+                api_secret=cross_cfg.spot_account.api_secret,
+                price_cache=spot_ws.price_cache,
+            )
+            ws_managers.append(spot_ws)
+
+        # — 合约端 —
+        if cross_cfg.futures_exchange == "aster":
+            from aster_ws_manager import AsterWSManager as FutAsterWS
+            from aster_adapter import AsterAdapter as FutAsterAdapter
+            fut_ws = FutAsterWS(
+                symbol=cfg.symbol_fut,
+                api_key=cross_cfg.futures_account.api_key,
+            )
+            fut_ws.start()
+            futures_adapter = FutAsterAdapter(
+                api_key=cross_cfg.futures_account.api_key,
+                api_secret=cross_cfg.futures_account.api_secret,
+                price_cache=fut_ws.price_cache,
+            )
+            ws_managers.append(fut_ws)
+        else:  # binance
+            from ws_manager import WSManager as FutWSManager
+            from binance_adapter import BinanceAdapter as FutBinanceAdapter
+            fut_ws = FutWSManager(
+                symbol=cfg.symbol_fut,
+                api_key=cross_cfg.futures_account.api_key,
+            )
+            fut_ws.start()
+            futures_adapter = FutBinanceAdapter(
+                api_key=cross_cfg.futures_account.api_key,
+                api_secret=cross_cfg.futures_account.api_secret,
+                price_cache=fut_ws.price_cache,
+            )
+            ws_managers.append(fut_ws)
+
+        # — 组合复合 adapter —
+        adapter = CrossExchangeAdapter(spot_adapter, futures_adapter)
+        fill_queue = spot_ws.fill_queue  # 成交事件来自现货端
+
+        logger.info("跨所模式: 现货=%s(%s) | 合约=%s(%s)",
+                     cross_cfg.spot_exchange, cross_cfg.spot_account.label,
+                     cross_cfg.futures_exchange, cross_cfg.futures_account.label)
+
+    elif exchange == "aster":
+        # ── 单所: Aster ──
         from aster_ws_manager import AsterWSManager
         from aster_adapter import AsterAdapter
         ws = AsterWSManager(
@@ -106,7 +217,10 @@ def main() -> None:
             api_secret=account.api_secret,
             price_cache=ws.price_cache,
         )
+        fill_queue = ws.fill_queue
+        ws_managers.append(ws)
     else:
+        # ── 单所: Binance ──
         from ws_manager import WSManager
         from binance_adapter import BinanceAdapter
         ws = WSManager(
@@ -119,6 +233,8 @@ def main() -> None:
             api_secret=account.api_secret,
             price_cache=ws.price_cache,
         )
+        fill_queue = ws.fill_queue
+        ws_managers.append(ws)
 
     # 启动前校验交易对
     exchange_info = adapter.preflight_check(cfg.symbol_spot, cfg.symbol_fut)
@@ -147,10 +263,19 @@ def main() -> None:
         fee=fee,
         cfg=cfg,
         trade_logger=trade_log,
-        fill_queue=ws.fill_queue,
+        fill_queue=fill_queue,
     )
+    if mode == "cross":
+        # 跨所模式优先降低 WS 漏包窗口，缩短 REST 对账间隔
+        bot.fh.set_rest_reconcile_interval(2.0)
+        logger.info("跨所模式: REST 对账间隔已调整为 %.1fs", 2.0)
     bot.notifier = notifier
     if notifier:
+        if mode == "cross":
+            cross_cfg = log_config["cross_config"]
+            notifier.mode = "cross"
+            notifier.spot_exchange = cross_cfg.spot_exchange
+            notifier.futures_exchange = cross_cfg.futures_exchange
         notifier.notify_start(cfg.symbol_spot)
 
     # ── 信号处理 ──
@@ -163,7 +288,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
 
     # ── 控制服务器（Unix socket，供 ctl.py 远程控制） ──
-    ctrl = ControlServer(bot, account_name=account.name, account_label=account.label, exchange=exchange)
+    ctrl_kwargs = dict(account_name=account.name, account_label=account.label, exchange=exchange, mode=mode)
+    if mode == "cross":
+        cross_cfg = log_config["cross_config"]
+        ctrl_kwargs["spot_exchange"] = cross_cfg.spot_exchange
+        ctrl_kwargs["futures_exchange"] = cross_cfg.futures_exchange
+        ctrl_kwargs["spot_account_label"] = cross_cfg.spot_account.label
+        ctrl_kwargs["futures_account_label"] = cross_cfg.futures_account.label
+    ctrl = ControlServer(bot, **ctrl_kwargs)
     ctrl.start()
 
     # ── 运行 ──
@@ -183,7 +315,8 @@ def main() -> None:
         if bot.naked_exposure > 0:
             logger.critical("!!! 退出时存在裸露仓位: %s — 请手动处理 !!!", bot.naked_exposure)
 
-        ws.stop()
+        for wm in ws_managers:
+            wm.stop()
         trade_log.close()
         logger.info("套利机器人已完全退出")
 

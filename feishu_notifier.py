@@ -16,9 +16,14 @@ class FeishuNotifier:
     def __init__(self, webhook_url: str) -> None:
         self._url = webhook_url
         self.account_label: str = ""  # 由 run.py 设置
+        self.mode: str = "single"     # single | cross
+        self.spot_exchange: str = ""   # 跨所模式: 现货交易所
+        self.futures_exchange: str = ""  # 跨所模式: 合约交易所
 
     @property
     def _prefix(self) -> str:
+        if self.mode == "cross" and self.spot_exchange:
+            return f"[{self.account_label}|{self.spot_exchange}+{self.futures_exchange}] "
         return f"[{self.account_label}] " if self.account_label else ""
 
     # ── 底层发送 ──────────────────────────────────────────────

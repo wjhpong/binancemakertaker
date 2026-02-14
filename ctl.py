@@ -114,25 +114,89 @@ def _read_remote_accounts() -> list[dict]:
 
 
 def _read_remote_exchange() -> str:
-    """读取 config.yaml 的 exchange 字段。"""
+    """读取当前交易所配置。跨所模式返回 'gate+binance' 格式。"""
     try:
         text = _read_config_text()
+        mode = "single"
+        exchange = "binance"
+        spot_ex = ""
+        fut_ex = ""
         for line in text.splitlines():
-            if line.startswith("exchange:"):
-                return line.split(":")[-1].strip()
+            stripped = line.strip()
+            if stripped.startswith("mode:"):
+                mode = stripped.split(":")[-1].strip()
+            elif stripped.startswith("exchange:") and not stripped.startswith("spot_exchange") and not stripped.startswith("futures_exchange"):
+                if not line.startswith(" "):  # 顶层 exchange
+                    exchange = stripped.split(":")[-1].strip()
+            elif stripped.startswith("spot_exchange:"):
+                spot_ex = stripped.split(":")[-1].strip()
+            elif stripped.startswith("futures_exchange:"):
+                fut_ex = stripped.split(":")[-1].strip()
+        if mode == "cross" and spot_ex and fut_ex:
+            return f"{spot_ex}+{fut_ex}"
+        return exchange
     except Exception:
         pass
     return "binance"
 
 
+def _read_remote_mode() -> str:
+    """读取 config.yaml 的 mode 字段。"""
+    try:
+        text = _read_config_text()
+        for line in text.splitlines():
+            if line.startswith("mode:"):
+                return line.split(":")[-1].strip()
+    except Exception:
+        pass
+    return "single"
+
+
 def _set_remote_exchange(exchange: str) -> bool:
-    """修改 config.yaml 的 exchange 字段。"""
+    """修改 config.yaml 的 exchange 字段（单所模式）。"""
     if exchange not in ("binance", "aster"):
         print(f"  ⚠ 不支持的交易所: {exchange}")
         return False
     config_path = _get_config_path()
     ok, out = _run_cmd(f"sed -i 's/^exchange: .*/exchange: {exchange}/' {config_path} && echo OK")
     return "OK" in out
+
+
+def _set_remote_exchange_mode(selection: str) -> bool:
+    """根据选择设置单所或跨所模式。
+
+    selection 格式:
+      - "binance" / "aster" → 单所模式
+      - "gate+binance" / "bitget+binance" → 跨所模式
+    """
+    config_path = _get_config_path()
+    if "+" in selection:
+        # 跨所模式
+        parts = selection.split("+")
+        spot_ex = parts[0]
+        fut_ex = parts[1]
+        # 现货交易所 → 默认账户映射
+        spot_account_map = {
+            "gate": "gate1",
+            "bitget": "bitget1",
+        }
+        spot_acct = spot_account_map.get(spot_ex, spot_ex + "1")
+        cmds = [
+            f"sed -i 's/^mode: .*/mode: cross/' {config_path}",
+            f"sed -i 's/^  spot_exchange: .*/  spot_exchange: {spot_ex}/' {config_path}",
+            f"sed -i 's/^  futures_exchange: .*/  futures_exchange: {fut_ex}/' {config_path}",
+            f"sed -i 's/^  spot_account: .*/  spot_account: {spot_acct}/' {config_path}",
+        ]
+        ok, out = _run_cmd(" && ".join(cmds) + " && echo OK")
+        return "OK" in out
+    else:
+        # 单所模式
+        cmds = [
+            f"sed -i 's/^mode: .*/mode: single/' {config_path}",
+            f"sed -i 's/^exchange: .*/exchange: {selection}/' {config_path}",
+        ]
+        ok, out = _run_cmd(" && ".join(cmds) + " && echo OK")
+        return "OK" in out
 
 
 def _set_remote_active_account(account_name: str) -> bool:
@@ -288,9 +352,19 @@ def print_resp(resp: dict) -> None:
         exchange_name = resp.get("exchange", "")
         acct_label = resp.get("account_label", "")
         acct_name = resp.get("account_name", "")
+        run_mode = resp.get("mode", "single")
         if exchange_name:
-            print(f"交易所: {exchange_name}")
-        if acct_label:
+            if run_mode == "cross":
+                spot_ex = resp.get("spot_exchange", "")
+                fut_ex = resp.get("futures_exchange", "")
+                spot_label = resp.get("spot_account_label", "")
+                fut_label = resp.get("futures_account_label", "")
+                print(f"模式: 跨所套利")
+                print(f"  现货: {spot_ex} ({spot_label})")
+                print(f"  合约: {fut_ex} ({fut_label})")
+            else:
+                print(f"交易所: {exchange_name}")
+        if acct_label and run_mode != "cross":
             print(f"账户: {acct_label} ({acct_name})")
         print(f"代币: {symbol}")
         print(f"状态: {state}")
@@ -795,16 +869,25 @@ def interactive() -> None:
             _print_menu()
             continue
 
-        # 切换交易所
+        # 切换交易所 / 模式
         if choice == 13:
             current_ex = _read_remote_exchange()
-            print(f"  当前交易所: {current_ex}")
-            exchanges = ["binance", "aster"]
-            for i, ex in enumerate(exchanges, 1):
-                mark = " ← 当前" if ex == current_ex else ""
-                print(f"    {i}. {ex}{mark}")
+            current_mode = _read_remote_mode()
+            if current_mode == "cross":
+                print(f"  当前: 跨所模式 ({current_ex})")
+            else:
+                print(f"  当前: 单所模式 ({current_ex})")
+            options = [
+                ("binance", "单所"),
+                ("aster", "单所"),
+                ("gate+binance", "跨所"),
+                ("bitget+binance", "跨所"),
+            ]
+            for i, (name, mode_label) in enumerate(options, 1):
+                mark = " ← 当前" if name == current_ex else ""
+                print(f"    {i}. {name} ({mode_label}){mark}")
             try:
-                sel = input("选择交易所 [1-2，直接回车取消]: ").strip()
+                sel = input(f"选择 [1-{len(options)}，直接回车取消]: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -813,9 +896,9 @@ def interactive() -> None:
                 continue
             try:
                 idx = int(sel) - 1
-                if idx < 0 or idx >= len(exchanges):
+                if idx < 0 or idx >= len(options):
                     raise ValueError
-                new_exchange = exchanges[idx]
+                new_exchange = options[idx][0]
             except ValueError:
                 print("  ⚠ 无效选择")
                 _print_menu()
@@ -824,11 +907,11 @@ def interactive() -> None:
                 print(f"  已经是 {new_exchange}，无需切换")
                 _print_menu()
                 continue
-            if not _set_remote_exchange(new_exchange):
-                print("⚠ 修改交易所配置失败")
+            if not _set_remote_exchange_mode(new_exchange):
+                print("⚠ 修改配置失败")
                 _print_menu()
                 continue
-            print(f"已切换到交易所: {new_exchange}，正在重启机器人服务...")
+            print(f"已切换到: {new_exchange}，正在重启机器人服务...")
             if _restart_service():
                 time.sleep(3)
                 print(f"✅ 机器人已重启，交易所切换到 {new_exchange}")
@@ -839,8 +922,12 @@ def interactive() -> None:
 
         # 划转 (合约⇄现货)
         if choice == 14:
-            # 先查询余额信息
+            # 跨所模式不支持划转
             status = send_cmd("status", [])
+            if status.get("mode") == "cross":
+                print("  ⚠ 跨所模式不支持内部划转（资金在不同交易所）")
+                _print_menu()
+                continue
             fa = status.get("futures_account", {})
             spot_bal = status.get("actual_spot_balance", 0) or 0
             fut_avail = fa.get("available_balance", 0)

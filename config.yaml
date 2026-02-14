@@ -1,6 +1,16 @@
-# ── 账户配置 ──
+# ── 运行模式 ──
+mode: single             # single(单所) | cross(跨所)
+
+# ── 单所模式配置 ──
 active_account: main    # 当前使用的账户名
 exchange: binance        # 交易所: binance | aster
+
+# ── 跨所模式配置（仅 mode=cross 时使用）──
+cross_exchange:
+  spot_exchange: gate          # 现货交易所: gate | bitget | binance | aster
+  futures_exchange: binance    # 合约交易所: binance | aster
+  spot_account: gate1          # 现货账户（引用 accounts 段）
+  futures_account: main        # 合约账户（引用 accounts 段）
 
 accounts:
   main:
@@ -25,6 +35,19 @@ accounts:
     label: "eb65-aster"
     api_key_env: ASTER_API_KEY_EB65
     api_secret_env: ASTER_API_SECRET_EB65
+    total_budget: 4000
+
+  gate1:
+    label: "dennis-gate"
+    api_key_env: GATE_API_KEY
+    api_secret_env: GATE_API_SECRET
+    total_budget: 4000
+
+  bitget1:
+    label: "dennis-bitget"
+    api_key_env: BITGET_API_KEY
+    api_secret_env: BITGET_API_SECRET
+    passphrase_env: BITGET_PASSPHRASE
     total_budget: 4000
 
 # ── 费率（所有账户共享）──

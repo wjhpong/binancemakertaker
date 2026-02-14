@@ -27,11 +27,21 @@ class ControlServer:
         account_name: str = "",
         account_label: str = "",
         exchange: str = "binance",
+        mode: str = "single",
+        spot_exchange: str = "",
+        futures_exchange: str = "",
+        spot_account_label: str = "",
+        futures_account_label: str = "",
     ) -> None:
         self.bot = bot
         self._account_name = account_name
         self._account_label = account_label
         self._exchange = exchange
+        self._mode = mode
+        self._spot_exchange = spot_exchange
+        self._futures_exchange = futures_exchange
+        self._spot_account_label = spot_account_label
+        self._futures_account_label = futures_account_label
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
@@ -241,6 +251,12 @@ class ControlServer:
             snap["account_name"] = self._account_name
             snap["account_label"] = self._account_label
             snap["exchange"] = self._exchange
+            snap["mode"] = self._mode
+            if self._mode == "cross":
+                snap["spot_exchange"] = self._spot_exchange
+                snap["futures_exchange"] = self._futures_exchange
+                snap["spot_account_label"] = self._spot_account_label
+                snap["futures_account_label"] = self._futures_account_label
             return snap
 
         else:

@@ -33,6 +33,7 @@ class FillHandler:
         fill_queue: Optional[queue.Queue] = None,
         trade_logger=None,
         notifier=None,
+        rest_reconcile_interval_sec: float = 10.0,
     ) -> None:
         self.adapter = adapter
         self.cfg = cfg
@@ -52,9 +53,14 @@ class FillHandler:
         self.total_hedged_quote: float = 0.0
         self._last_rest_reconcile_ts: float = 0.0
         self._last_gap_check_ts: float = 0.0
+        self._rest_reconcile_interval_sec = max(0.5, float(rest_reconcile_interval_sec))
 
     def _state_guard(self):
         return self._state_lock if self._state_lock is not None else nullcontext()
+
+    def set_rest_reconcile_interval(self, seconds: float) -> None:
+        """运行时更新 REST 对账间隔（秒）。"""
+        self._rest_reconcile_interval_sec = max(0.5, float(seconds))
 
     def reset_counters(self) -> None:
         """清零所有统计计数器（开启新一轮时调用）。"""
@@ -157,7 +163,7 @@ class FillHandler:
         if self.fill_queue is not None:
             order_fills = self.drain_fill_queue()
             # 兜底对账：定期用 REST 校验，避免 WS 丢包导致漏对冲
-            if now - self._last_rest_reconcile_ts >= 10.0:
+            if now - self._last_rest_reconcile_ts >= self._rest_reconcile_interval_sec:
                 for oid in active_order_ids:
                     filled = self.adapter.get_order_filled_qty(self.cfg.symbol_spot, oid)
                     if filled >= 0:
