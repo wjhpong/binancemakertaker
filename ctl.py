@@ -324,6 +324,41 @@ def print_resp(resp: dict) -> None:
         else:
             print("  永续合约: 查询失败")
 
+        # 合约账户详情（Aster 等支持时显示）
+        fa = resp.get("futures_account", {})
+        if fa:
+            print("── 合约账户详情 ──")
+            wallet = fa.get("wallet_balance", 0)
+            unrealized = fa.get("unrealized_pnl", 0)
+            margin_bal = fa.get("margin_balance", 0)
+            avail = fa.get("available_balance", 0)
+            lev = fa.get("leverage", 0)
+            entry = fa.get("entry_price", 0)
+            mark = fa.get("mark_price", 0)
+            liq = fa.get("liquidation_price", 0)
+            liq_dist = fa.get("liq_distance_pct", 0)
+            notional = fa.get("notional", 0)
+            max_qty = fa.get("max_open_qty", 0)
+            max_notional = fa.get("max_open_notional", 0)
+            print(f"  钱包余额:     {wallet:,.2f} USDT")
+            print(f"  未实现盈亏:   {unrealized:+,.2f} USDT")
+            print(f"  保证金余额:   {margin_bal:,.2f} USDT")
+            print(f"  可用余额:     {avail:,.2f} USDT")
+            if lev > 0:
+                print(f"  杠杆:         {lev}x")
+            if entry > 0:
+                print(f"  开仓均价:     {entry:.6f}")
+            if mark > 0:
+                print(f"  标记价格:     {mark:.6f}")
+            if notional > 0:
+                print(f"  持仓名义:     {notional:,.2f} USDT")
+            if liq > 0:
+                print(f"  强平价格:     {liq:.6f}  (距离 {liq_dist:.1f}%)")
+            if max_qty > 0:
+                print(f"  还可开仓:     {max_qty:,.2f} 币 ({max_notional:,.2f} USDT)")
+            elif avail <= 0:
+                print("  还可开仓:     0 (可用余额不足)")
+
 
     elif "open_levels" in resp:
         # spread_info 响应 —— 根据当前方向只显示对应的 spread
@@ -376,6 +411,7 @@ _MENU = [
     ("修改代币", None, []),          # 切换交易对
     ("切换账户", None, []),          # 切换账户并重启
     ("切换交易所", None, []),        # 切换 binance / aster
+    ("划转", None, []),              # 合约⇄现货 内部划转
     ("退出", None, []),
 ]
 
@@ -755,6 +791,79 @@ def interactive() -> None:
                 print(f"✅ 机器人已重启，交易所切换到 {new_exchange}")
             except subprocess.TimeoutExpired:
                 print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
+            _print_menu()
+            continue
+
+        # 划转 (合约⇄现货)
+        if choice == 14:
+            # 先查询余额信息
+            status = send_cmd("status", [])
+            fa = status.get("futures_account", {})
+            spot_bal = status.get("actual_spot_balance", 0) or 0
+            fut_avail = fa.get("available_balance", 0)
+            fut_withdraw = fa.get("max_withdraw", 0)
+            print(f"  现货余额:       {spot_bal:,.4f} 币")
+            print(f"  合约可用余额:   {fut_avail:,.2f} USDT")
+            print(f"  合约可转出:     {fut_withdraw:,.2f} USDT")
+            print()
+            print("  划转方向:")
+            print("    1. 合约 → 现货")
+            print("    2. 现货 → 合约")
+            try:
+                d = input("  选择 [1/2，直接回车取消]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not d:
+                _print_menu()
+                continue
+            if d == "1":
+                direction = "to_spot"
+                label = "合约→现货"
+                max_hint = f"  (合约可转出最大: {fut_withdraw:,.2f} USDT)"
+            elif d == "2":
+                direction = "to_future"
+                label = "现货→合约"
+                max_hint = ""
+            else:
+                print("  ⚠ 无效选择")
+                _print_menu()
+                continue
+            try:
+                asset = input("  资产 (默认 USDT): ").strip().upper() or "USDT"
+                if max_hint:
+                    print(max_hint)
+                amount_str = input(f"  划转数量 ({asset}): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not amount_str:
+                print("  已取消")
+                _print_menu()
+                continue
+            try:
+                amount = float(amount_str)
+                if amount <= 0:
+                    raise ValueError
+            except ValueError:
+                print("  ⚠ 无效数量")
+                _print_menu()
+                continue
+            # 检查是否超限
+            if direction == "to_spot" and asset == "USDT" and amount > fut_withdraw:
+                print(f"  ⚠ 超过合约可转出上限 {fut_withdraw:,.2f} USDT")
+                confirm = input(f"  仍然尝试? [y/N]: ").strip().lower()
+                if confirm != "y":
+                    print("  已取消")
+                    _print_menu()
+                    continue
+            confirm = input(f"  确认划转 {amount} {asset} ({label})? [y/N]: ").strip().lower()
+            if confirm != "y":
+                print("  已取消")
+                _print_menu()
+                continue
+            resp = send_cmd("transfer", [asset, str(amount), direction])
+            print_resp(resp)
             _print_menu()
             continue
 

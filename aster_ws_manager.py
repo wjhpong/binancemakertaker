@@ -120,13 +120,22 @@ class AsterWSManager:
     # ── 消息处理 ──
 
     def _handle_spot_depth(self, data: dict) -> None:
-        """解析现货 depth5 推送: {"bids":[["price","qty"],...], "asks":[["price","qty"],...]}"""
+        """解析 Aster 现货深度推送。
+
+        Aster 用 depthUpdate 格式: {"e":"depthUpdate", "b":[...], "a":[...]}
+        也兼容 {"bids":[...], "asks":[...]} 格式。
+        """
         try:
-            bids = [(float(p), float(q)) for p, q in data["bids"]]
-            asks = [(float(p), float(q)) for p, q in data["asks"]]
+            raw_bids = data.get("b") or data.get("bids")
+            raw_asks = data.get("a") or data.get("asks")
+            if raw_bids is None or raw_asks is None:
+                logger.warning("Aster 现货深度数据缺少 b/a 字段: %s", data)
+                return
+            bids = [(float(p), float(q)) for p, q in raw_bids]
+            asks = [(float(p), float(q)) for p, q in raw_asks]
             self.price_cache.update_spot_depth(bids, asks)
-        except (KeyError, ValueError, TypeError):
-            logger.warning("Aster 现货 depth5 数据异常: %s", data)
+        except (ValueError, TypeError):
+            logger.warning("Aster 现货深度数据解析失败: %s", data)
 
     def _handle_futures_book(self, data: dict) -> None:
         """解析合约 bookTicker: {"b":"bid","a":"ask",...}"""

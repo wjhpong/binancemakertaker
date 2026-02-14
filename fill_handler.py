@@ -201,7 +201,9 @@ class FillHandler:
 
         # 批量对冲
         if total_new_unhedged > 1e-12:
-            _, hedged_qty = self.try_hedge(total_new_unhedged)
+            # trade_logs: [(symbol, order_id, price, qty), ...] → spot_fills: [(price, qty), ...]
+            spot_fills = [(price, qty) for _, _, price, qty in trade_logs] if trade_logs else None
+            _, hedged_qty = self.try_hedge(total_new_unhedged, spot_fills=spot_fills)
             remaining_hedge = hedged_qty
             # 在一次锁内完成对冲量分配，保证 hedged_qty 更新的原子性
             with self._state_guard():
@@ -276,7 +278,7 @@ class FillHandler:
 
     # ── 对冲执行 ─────────────────────────────────────────────
 
-    def try_hedge(self, qty: float) -> tuple[bool, float]:
+    def try_hedge(self, qty: float, spot_fills: list[tuple[float, float]] | None = None) -> tuple[bool, float]:
         """合约市价卖出对冲，带重试。返回 (成功, 实际对冲量)。"""
         with self._hedge_lock:
             with self._state_guard():
@@ -321,6 +323,7 @@ class FillHandler:
                             hedge_price=hedge_price,
                             total_filled=total_filled_snapshot,
                             total_budget=self.cfg.total_budget,
+                            spot_fills=spot_fills,
                         )
                     if residual > 1e-12:
                         logger.warning(

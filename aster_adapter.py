@@ -4,7 +4,7 @@ Aster API 与 Binance 高度兼容（相同 HMAC-SHA256 签名、相同 X-MBX-AP
 主要差异在于域名和部分路径版本号。
 
 现货 REST: https://sapi.asterdex.com  (/api/v1/*)
-合约 REST: https://fapi.asterdex.com  (/fapi/v3/*)
+合约 REST: https://fapi.asterdex.com  (/fapi/v1/* + /fapi/v2/*)
 """
 
 from __future__ import annotations
@@ -165,7 +165,7 @@ class AsterAdapter(ExchangeAdapter):
         """avgPrice=0 时追加查询订单明细兜底拿成交均价。"""
         for i in range(3):
             try:
-                resp = self._fapi_request("GET", "/fapi/v3/order", {
+                resp = self._fapi_request("GET", "/fapi/v1/order", {
                     "symbol": symbol_fut,
                     "orderId": order_id,
                 })
@@ -356,7 +356,7 @@ class AsterAdapter(ExchangeAdapter):
 
     def place_futures_market_sell(self, symbol_fut: str, qty: float) -> str:
         self._fut_limiter.wait_if_needed(weight=1)
-        resp = self._fapi_request("POST", "/fapi/v3/order", {
+        resp = self._fapi_request("POST", "/fapi/v1/order", {
             "symbol": symbol_fut,
             "side": "SELL",
             "type": "MARKET",
@@ -372,7 +372,7 @@ class AsterAdapter(ExchangeAdapter):
 
     def place_futures_market_buy(self, symbol_fut: str, qty: float) -> str:
         self._fut_limiter.wait_if_needed(weight=1)
-        resp = self._fapi_request("POST", "/fapi/v3/order", {
+        resp = self._fapi_request("POST", "/fapi/v1/order", {
             "symbol": symbol_fut,
             "side": "BUY",
             "type": "MARKET",
@@ -394,17 +394,33 @@ class AsterAdapter(ExchangeAdapter):
     # ── 账户持仓查询 ──────────────────────────────────────────
 
     def get_spot_balance(self, asset: str) -> float:
-        """查询 Aster 现货余额。"""
+        """查询 Aster 现货余额（现货账户 + 合约账户余额之和）。"""
+        total = 0.0
+
+        # 1) 现货账户
         try:
             self._spot_limiter.wait_if_needed(weight=10)
             account = self._spot_request("GET", "/api/v1/account")
             for b in account.get("balances", []):
                 if b.get("asset") == asset:
-                    return float(b.get("free", 0)) + float(b.get("locked", 0))
-            return 0.0
+                    total += float(b.get("free", 0)) + float(b.get("locked", 0))
+                    break
         except Exception:
-            logger.exception("查询 Aster 现货余额失败: asset=%s", asset)
-            return -1.0
+            logger.warning("查询 Aster 现货账户余额失败: asset=%s", asset)
+
+        # 2) 合约账户余额
+        try:
+            self._fut_limiter.wait_if_needed(weight=5)
+            resp = self._fapi_request("GET", "/fapi/v2/balance")
+            if isinstance(resp, list):
+                for item in resp:
+                    if item.get("asset") == asset:
+                        total += float(item.get("balance", 0))
+                        break
+        except Exception:
+            logger.warning("查询 Aster 合约账户余额失败: asset=%s", asset)
+
+        return total if total > 0 else (0.0 if total == 0.0 else -1.0)
 
     def get_earn_balance(self, asset: str) -> float:
         """Aster 暂不支持理财产品查询，返回 0。"""
@@ -414,7 +430,7 @@ class AsterAdapter(ExchangeAdapter):
         """查询 Aster 永续合约持仓量（负数=空头）。"""
         self._fut_limiter.wait_if_needed(weight=5)
         try:
-            resp = self._fapi_request("GET", "/fapi/v3/positionRisk", {"symbol": symbol_fut})
+            resp = self._fapi_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol_fut})
             if isinstance(resp, list):
                 for item in resp:
                     if item.get("symbol") == symbol_fut:
@@ -424,3 +440,81 @@ class AsterAdapter(ExchangeAdapter):
         except Exception:
             logger.exception("查询 Aster 合约持仓失败: symbol=%s", symbol_fut)
             return 0.0
+
+    def get_futures_account_info(self, symbol_fut: str) -> dict:
+        """查询 Aster 合约账户详情：保证金、可用余额、强平价、可开仓位等。"""
+        result: dict = {}
+        try:
+            self._fut_limiter.wait_if_needed(weight=5)
+            acc = self._fapi_request("GET", "/fapi/v2/account")
+            if isinstance(acc, dict):
+                result["wallet_balance"] = float(acc.get("totalWalletBalance", 0))
+                result["unrealized_pnl"] = float(acc.get("totalUnrealizedProfit", 0))
+                result["margin_balance"] = float(acc.get("totalMarginBalance", 0))
+                result["available_balance"] = float(acc.get("availableBalance", 0))
+                result["max_withdraw"] = float(acc.get("maxWithdrawAmount", 0))
+                # 从 positions 中提取当前币对的持仓保证金
+                for p in acc.get("positions", []):
+                    if p.get("symbol") == symbol_fut and float(p.get("positionAmt", 0)) != 0:
+                        result["position_initial_margin"] = float(p.get("positionInitialMargin", 0))
+                        result["maint_margin"] = float(p.get("maintMargin", 0))
+                        result["leverage"] = int(p.get("leverage", 1))
+                        result["entry_price"] = float(p.get("entryPrice", 0))
+                        result["notional"] = abs(float(p.get("notional", 0)))
+                        break
+        except Exception:
+            logger.warning("查询 Aster 合约账户信息失败")
+
+        try:
+            self._fut_limiter.wait_if_needed(weight=5)
+            resp = self._fapi_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol_fut})
+            if isinstance(resp, list):
+                for item in resp:
+                    if item.get("symbol") == symbol_fut:
+                        result["liquidation_price"] = float(item.get("liquidationPrice", 0))
+                        result["mark_price"] = float(item.get("markPrice", 0))
+                        break
+        except Exception:
+            logger.warning("查询 Aster 合约 positionRisk 失败")
+
+        # 计算距离强平的百分比和可开仓量
+        mark = result.get("mark_price", 0)
+        liq = result.get("liquidation_price", 0)
+        if mark > 0 and liq > 0:
+            result["liq_distance_pct"] = round(abs(liq - mark) / mark * 100, 2)
+        avail = result.get("available_balance", 0)
+        leverage = result.get("leverage", 1)
+        if mark > 0 and avail > 0 and leverage > 0:
+            result["max_open_qty"] = round(avail * leverage / mark, 2)
+            result["max_open_notional"] = round(avail * leverage, 2)
+
+        return result
+
+    def internal_transfer(self, asset: str, amount: float, direction: str) -> dict:
+        """在现货和合约账户之间划转资产。
+
+        direction:
+            'to_spot'   — 合约 → 现货 (FUTURE_SPOT)
+            'to_future' — 现货 → 合约 (SPOT_FUTURE)
+
+        Returns: {"tranId": ..., "status": "SUCCESS"} or raises Exception.
+        """
+        import uuid
+
+        kind_map = {
+            "to_spot": "FUTURE_SPOT",
+            "to_future": "SPOT_FUTURE",
+        }
+        kind_type = kind_map.get(direction)
+        if not kind_type:
+            raise ValueError(f"无效方向: {direction}，应为 'to_spot' 或 'to_future'")
+
+        self._fut_limiter.wait_if_needed(weight=5)
+        resp = self._fapi_request("POST", "/fapi/v1/asset/wallet/transfer", {
+            "asset": asset,
+            "amount": _fmt_decimal(amount),
+            "clientTranId": str(uuid.uuid4()),
+            "kindType": kind_type,
+        })
+        logger.info("Aster 内部划转完成: %s %s %s → %s", amount, asset, direction, resp)
+        return resp

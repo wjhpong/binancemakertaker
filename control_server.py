@@ -211,6 +211,30 @@ class ControlServer:
             summary["msg"] = summary.get("msg", "已终止平仓")
             return summary
 
+        elif cmd == "transfer":
+            # 划转: transfer <asset> <amount> <direction>
+            # direction: to_spot | to_future
+            if len(args) < 3:
+                return {"ok": False, "msg": "用法: transfer <asset> <amount> <to_spot|to_future>"}
+            asset = str(args[0]).upper()
+            try:
+                amount = float(args[1])
+                if amount <= 0:
+                    return {"ok": False, "msg": "金额必须 > 0"}
+            except ValueError:
+                return {"ok": False, "msg": "无效金额"}
+            direction = str(args[2]).lower()
+            if direction not in ("to_spot", "to_future"):
+                return {"ok": False, "msg": "方向必须为 to_spot 或 to_future"}
+            if not hasattr(bot.adapter, "internal_transfer"):
+                return {"ok": False, "msg": "当前交易所不支持划转"}
+            try:
+                result = bot.adapter.internal_transfer(asset, amount, direction)
+                label = "合约→现货" if direction == "to_spot" else "现货→合约"
+                return {"ok": True, "msg": f"划转成功: {amount} {asset} ({label})", "result": result}
+            except Exception as e:
+                return {"ok": False, "msg": f"划转失败: {e}"}
+
         elif cmd == "status":
             snap = bot.get_status_snapshot()
             snap["ok"] = True

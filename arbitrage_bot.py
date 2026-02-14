@@ -87,6 +87,10 @@ class ExchangeAdapter:
     def get_earn_balance(self, asset: str) -> float:
         raise NotImplementedError
 
+    def get_futures_account_info(self, symbol_fut: str) -> dict:
+        """查询合约账户信息（保证金、可用余额、强平价等），默认返回空 dict。"""
+        return {}
+
 
 @dataclass
 class LevelOrder:
@@ -449,6 +453,72 @@ class SpotFuturesArbitrageBot:
             order["current_level"] = cur_level
         return orders
 
+    def get_spread_snapshot(self) -> dict:
+        """返回当前实时价差率（开仓/平仓两个方向，类似 +A-B / -A+B）。
+
+        开仓 (+A-B): 买现货(bid) + 卖永续(bid)  → spread = (fut_bid - spot_bid) / spot_bid
+        平仓 (-A+B): 卖现货(ask) + 买永续(ask)  → spread = (spot_ask - fut_ask) / fut_ask
+        """
+        try:
+            fut_bid = self.adapter.get_futures_best_bid(self.cfg.symbol_fut)
+            spot_bids = self.adapter.get_spot_depth(self.cfg.symbol_spot)
+        except Exception as e:
+            return {"ok": False, "msg": f"获取行情失败: {e}"}
+
+        fut_ask = 0.0
+        try:
+            fut_ask = self.adapter.get_futures_best_ask(self.cfg.symbol_fut)
+        except Exception:
+            pass
+
+        spot_asks: list[tuple[float, float]] = []
+        try:
+            spot_asks = self.adapter.get_spot_asks(self.cfg.symbol_spot)
+        except Exception:
+            pass
+
+        # 开仓方向: +A-B = 买现货(spot_bid) + 卖永续(fut_bid)
+        open_levels = []
+        for i, (bid_price, bid_qty) in enumerate(spot_bids[:5], 1):
+            if bid_price <= 0:
+                continue
+            spread = (fut_bid - bid_price) / bid_price
+            open_levels.append({
+                "level": i,
+                "price": bid_price,
+                "spread_bps": round(spread * 10000, 4),
+                "depth": round(bid_qty, 2),
+            })
+
+        # 平仓方向: -A+B = 卖现货(spot_ask) + 买永续(fut_ask)
+        close_levels = []
+        for i, (ask_price, ask_qty) in enumerate(spot_asks[:5], 1):
+            if ask_price <= 0 or fut_ask <= 0:
+                continue
+            spread = (ask_price - fut_ask) / fut_ask
+            close_levels.append({
+                "level": i,
+                "price": ask_price,
+                "spread_bps": round(spread * 10000, 4),
+                "depth": round(ask_qty, 2),
+            })
+
+        # 判断当前方向
+        with self._close_task_lock:
+            close_running = self._close_task_running
+        direction = "close" if close_running else "open"
+
+        return {
+            "ok": True,
+            "symbol": self.cfg.symbol_spot,
+            "direction": direction,
+            "fut_bid": fut_bid,
+            "fut_ask": fut_ask,
+            "min_spread_bps": round(self.fee.min_spread_bps, 4),
+            "open_levels": open_levels,
+            "close_levels": close_levels,
+        }
+
     def get_status_snapshot(self) -> dict:
         with self._state_lock:
             remaining = self._remaining_budget()
@@ -496,11 +566,16 @@ class SpotFuturesArbitrageBot:
                 self._cached_futures_position = round(self.adapter.get_futures_position(self.cfg.symbol_fut), 6)
             except Exception:
                 self._cached_futures_position = None
+            try:
+                self._cached_futures_account = self.adapter.get_futures_account_info(self.cfg.symbol_fut)
+            except Exception:
+                self._cached_futures_account = {}
             self._balance_cache_ts = now
 
         snap["actual_spot_balance"] = getattr(self, "_cached_spot_balance", None)
         snap["actual_earn_balance"] = getattr(self, "_cached_earn_balance", None)
         snap["actual_futures_position"] = getattr(self, "_cached_futures_position", None)
+        snap["futures_account"] = getattr(self, "_cached_futures_account", {})
 
         return snap
 
@@ -888,7 +963,8 @@ class SpotFuturesArbitrageBot:
     ) -> list[tuple[int, float, float]]:
         """选出满足 spread 的档位（买一/买二/买三），按固定比例分配预算。
 
-        当前策略要求买一、买二、买三必须同时满足条件，否则本轮不挂单。
+        只需检查买一 spread（买一价格最高 → spread 最小），
+        买二、买三价格更低 spread 必然更大，无需重复检查。
         返回 [(level_idx, price, qty), ...] ，空列表表示本轮不挂。
         """
         if fut_bid <= 0:
@@ -906,6 +982,20 @@ class SpotFuturesArbitrageBot:
         if cycle_budget < lot:
             return []
 
+        # 只检查买一 spread（最严格），过了则买二买三必然也过
+        if not spot_bids:
+            return []
+        bid1_price = spot_bids[0][0]
+        if bid1_price <= 0:
+            return []
+        spread_bid1 = (fut_bid - bid1_price) / bid1_price
+        if spread_bid1 < min_spread:
+            logger.info(
+                "[SELECT] 买一 spread=%.4fbps 低于门槛 %.4fbps，本轮不挂",
+                spread_bid1 * 10000, min_spread * 10000,
+            )
+            return []
+
         plan: list[dict] = []
         for level_idx, weight in self._LEVEL_WEIGHTS.items():
             if level_idx > len(spot_bids):
@@ -914,13 +1004,6 @@ class SpotFuturesArbitrageBot:
             bid_price, level_qty = spot_bids[level_idx - 1]
             if bid_price <= 0:
                 logger.info("[SELECT] 买%d 价格无效，跳过本轮", level_idx)
-                return []
-            spread = (fut_bid - bid_price) / bid_price
-            if spread < min_spread:
-                logger.info(
-                    "[SELECT] 买%d spread=%.4fbps 低于门槛 %.4fbps，本轮不挂",
-                    level_idx, spread * 10000, min_spread * 10000,
-                )
                 return []
 
             desired_qty = int((cycle_budget * weight) / lot) * lot
@@ -1100,6 +1183,7 @@ class SpotFuturesArbitrageBot:
             with self._state_lock:
                 self._active_orders[oid] = order
                 self._level_to_oid[level_idx] = oid
+                self._insufficient_balance_notified = False  # 成功下单后重置
 
             logger.info("[QUOTE] 买%d 挂单: price=%s, qty=%.2f, order_id=%s",
                         level_idx, price, qty, oid)
@@ -1107,9 +1191,26 @@ class SpotFuturesArbitrageBot:
             if self.trade_logger:
                 self.trade_logger.log_spot_order(self.cfg.symbol_spot, oid, price, qty)
             return oid
-        except Exception:
+        except Exception as exc:
             logger.exception("[QUOTE] 买%d 挂单失败: price=%s, qty=%.2f",
                              level_idx, price, qty)
+            # 余额不足时飞书通知（带冷却，避免刷屏）
+            exc_str = str(exc)
+            if "insufficient balance" in exc_str.lower() or "-2010" in exc_str:
+                now = time.time()
+                last = getattr(self, "_insufficient_balance_ts", 0.0)
+                notified = getattr(self, "_insufficient_balance_notified", False)
+                if not notified or now - last > 300:  # 首次或超过5分钟再通知
+                    self._insufficient_balance_ts = now
+                    self._insufficient_balance_notified = True
+                    notional = round(price * qty, 2)
+                    logger.warning("[BALANCE] 余额不足，需要 ~%.2f USDT", notional)
+                    if self.notifier:
+                        self.notifier._send_async(
+                            f"{self.notifier._prefix}[余额不足] {self.cfg.symbol_spot}\n"
+                            f"挂单失败: 买{level_idx} price={price}, qty={qty:.2f}\n"
+                            f"需要 ~{notional:.2f} USDT，请充值"
+                        )
             return None
 
     # ── 订单同步（核心） ──────────────────────────────────────

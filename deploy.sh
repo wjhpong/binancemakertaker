@@ -93,6 +93,7 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/home/ubuntu/arbitrage-bot
+ReadWritePaths=/tmp
 
 [Install]
 WantedBy=multi-user.target

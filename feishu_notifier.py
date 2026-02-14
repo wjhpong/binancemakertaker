@@ -116,14 +116,21 @@ class FeishuNotifier:
         hedge_price: float | None,
         total_filled: float,
         total_budget: float,
+        spot_fills: list[tuple[float, float]] | None = None,
     ) -> None:
         """开仓成交记录：现货买入 → 永续卖出对冲。"""
-        price_str = f"@ {hedge_price:.6f}" if hedge_price and hedge_price > 0 else ""
-        self._send_async(
-            f"{self._prefix}[开仓成交] {symbol}\n"
-            f"对冲: {hedge_qty:.4f} 币 {price_str}\n"
-            f"累计: {total_filled:.4f} / {total_budget:.4f} 币"
-        )
+        lines = [f"{self._prefix}[开仓成交] {symbol}"]
+        # 现货买入明细
+        if spot_fills:
+            for price, qty in spot_fills:
+                lines.append(f"现货买入: {qty:.4f} 币 @ {price:.6f}")
+        # 合约对冲
+        hedge_str = f"对冲卖出: {hedge_qty:.4f} 币"
+        if hedge_price and hedge_price > 0:
+            hedge_str += f" @ {hedge_price:.6f}"
+        lines.append(hedge_str)
+        lines.append(f"累计: {total_filled:.4f} / {total_budget:.4f} 币")
+        self._send_async("\n".join(lines))
 
     def notify_close_trade(
         self,
