@@ -31,7 +31,7 @@ accounts:
 fee:
   spot_maker: 0.000675      # VIP2 maker 0.09% × BNB 75% = 0.0675%
   fut_taker: 0.00036        # VIP2 taker 0.04% × BNB 90% = 0.036%
-  min_spread_bps: -18       # 最小spread门槛 (bps)，可为负
+  min_spread_bps: 0         # 最小spread门槛 (bps)，可为负，通过ctl.py菜单10调整
 
 # ── 策略（所有账户共享，total_budget 在 accounts 中单独配置）──
 strategy:

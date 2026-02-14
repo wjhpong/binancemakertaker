@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""本地命令行客户端 —— 通过 SSH 远程控制 EC2 上的套利机器人。
+"""套利机器人控制客户端 —— 自动检测本地/远程模式。
+
+在 EC2 上运行时直接连接 Unix socket（推荐）；
+在本地 Mac 上运行时通过 SSH 转发。
 
 用法:
     python ctl.py status
@@ -20,6 +23,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket as socket_mod
 import subprocess
 import sys
 import time
@@ -27,23 +32,68 @@ import time
 SSH_HOST = "tixian"  # ~/.ssh/config 中定义的 EC2 host
 SOCK_PATH = "/tmp/arb-bot.sock"
 REMOTE_CONFIG = "/home/ubuntu/arbitrage-bot/config.yaml"
+LOCAL_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+
+# 自动检测：socket 文件存在说明在 EC2 本地运行
+IS_LOCAL = os.path.exists(SOCK_PATH)
 
 
-def _read_remote_accounts() -> list[dict]:
-    """通过 SSH 读取远程 config.yaml 的账户列表。
+def _get_config_path() -> str:
+    """返回 config.yaml 路径（本地或远程）。"""
+    return LOCAL_CONFIG if IS_LOCAL else REMOTE_CONFIG
 
-    Returns:
-        [{"name": "main", "label": "主账户", "budget": 4000, "active": True}, ...]
-    """
+
+def _read_config_text() -> str:
+    """读取 config.yaml 内容。"""
+    if IS_LOCAL:
+        try:
+            with open(LOCAL_CONFIG, "r") as f:
+                return f.read()
+        except Exception:
+            return ""
     try:
         result = subprocess.run(
             ["ssh", SSH_HOST, f"cat {REMOTE_CONFIG}"],
             capture_output=True, text=True, timeout=10,
         )
-        if result.returncode != 0:
+        return result.stdout if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _run_cmd(cmd_str: str, timeout: int = 10) -> tuple[bool, str]:
+    """执行 shell 命令（本地或 SSH）。"""
+    if IS_LOCAL:
+        try:
+            r = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, timeout=timeout)
+            return r.returncode == 0, r.stdout.strip()
+        except Exception:
+            return False, ""
+    try:
+        r = subprocess.run(["ssh", SSH_HOST, cmd_str], capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, r.stdout.strip()
+    except Exception:
+        return False, ""
+
+
+def _restart_service() -> bool:
+    """重启 arb-bot 服务。"""
+    ok, _ = _run_cmd("sudo systemctl restart arb-bot", timeout=15)
+    return ok
+
+
+def _read_remote_accounts() -> list[dict]:
+    """读取 config.yaml 的账户列表。
+
+    Returns:
+        [{"name": "main", "label": "主账户", "budget": 4000, "active": True}, ...]
+    """
+    try:
+        text = _read_config_text()
+        if not text:
             return []
         import yaml
-        raw = yaml.safe_load(result.stdout)
+        raw = yaml.safe_load(text)
         if not isinstance(raw, dict):
             return []
         accounts_raw = raw.get("accounts")
@@ -64,57 +114,35 @@ def _read_remote_accounts() -> list[dict]:
 
 
 def _read_remote_exchange() -> str:
-    """通过 SSH 读取远程 config.yaml 的 exchange 字段。"""
+    """读取 config.yaml 的 exchange 字段。"""
     try:
-        result = subprocess.run(
-            ["ssh", SSH_HOST, f"grep '^exchange:' {REMOTE_CONFIG}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().split(":")[-1].strip()
+        text = _read_config_text()
+        for line in text.splitlines():
+            if line.startswith("exchange:"):
+                return line.split(":")[-1].strip()
     except Exception:
         pass
     return "binance"
 
 
 def _set_remote_exchange(exchange: str) -> bool:
-    """通过 SSH sed 修改远程 config.yaml 的 exchange 字段。"""
+    """修改 config.yaml 的 exchange 字段。"""
     if exchange not in ("binance", "aster"):
         print(f"  ⚠ 不支持的交易所: {exchange}")
         return False
-    remote_cmd = (
-        f"cd /home/ubuntu/arbitrage-bot && "
-        f"sed -i 's/^exchange: .*/exchange: {exchange}/' config.yaml && "
-        f"echo OK"
-    )
-    try:
-        result = subprocess.run(
-            ["ssh", SSH_HOST, remote_cmd],
-            capture_output=True, text=True, timeout=10,
-        )
-        return "OK" in result.stdout
-    except Exception:
-        return False
+    config_path = _get_config_path()
+    ok, out = _run_cmd(f"sed -i 's/^exchange: .*/exchange: {exchange}/' {config_path} && echo OK")
+    return "OK" in out
 
 
 def _set_remote_active_account(account_name: str) -> bool:
-    """通过 SSH sed 修改远程 config.yaml 的 active_account 字段。"""
+    """修改 config.yaml 的 active_account 字段。"""
     if not account_name.replace("_", "").replace("-", "").isalnum():
         print(f"  ⚠ 账户名包含非法字符: {account_name}")
         return False
-    remote_cmd = (
-        f"cd /home/ubuntu/arbitrage-bot && "
-        f"sed -i 's/^active_account: .*/active_account: {account_name}/' config.yaml && "
-        f"echo OK"
-    )
-    try:
-        result = subprocess.run(
-            ["ssh", SSH_HOST, remote_cmd],
-            capture_output=True, text=True, timeout=10,
-        )
-        return "OK" in result.stdout
-    except Exception:
-        return False
+    config_path = _get_config_path()
+    ok, out = _run_cmd(f"sed -i 's/^active_account: .*/active_account: {account_name}/' {config_path} && echo OK")
+    return "OK" in out
 
 
 def _select_account() -> str | None:
@@ -151,10 +179,51 @@ def _select_account() -> str | None:
     return None
 
 
+def _send_local(payload: str) -> str:
+    """直接通过 Unix socket 发送命令（EC2 本地模式）。"""
+    sock = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+    sock.settimeout(25)
+    sock.connect(SOCK_PATH)
+    sock.sendall(payload.encode("utf-8") + b"\n")
+    data = b""
+    while True:
+        chunk = sock.recv(8192)
+        if not chunk:
+            break
+        data += chunk
+        if b"\n" in data or len(data) > 65536:
+            break
+    sock.close()
+    return data.decode("utf-8").strip()
+
+
 def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
-    """通过 SSH 发送命令到 EC2 上的 Unix socket。"""
+    """发送命令到机器人控制服务。自动选择本地直连或 SSH 转发。"""
     payload = json.dumps({"cmd": cmd, "args": args or []})
-    # 用 socat 连接 Unix socket
+
+    if IS_LOCAL:
+        # EC2 本地模式：直连 Unix socket
+        for attempt in (1, 2):
+            try:
+                out = _send_local(payload)
+                if out:
+                    return json.loads(out)
+                return {"ok": False, "msg": "无响应"}
+            except FileNotFoundError:
+                if cmd == "start" and attempt == 1:
+                    print("机器人未运行，正在启动服务...")
+                    subprocess.run(["sudo", "systemctl", "start", "arb-bot"],
+                                   capture_output=True, timeout=15)
+                    time.sleep(3)
+                    continue
+                return {"ok": False, "msg": "机器人未运行或控制服务未启动"}
+            except (ConnectionRefusedError, OSError) as e:
+                return {"ok": False, "msg": f"连接失败: {e}"}
+            except json.JSONDecodeError as e:
+                return {"ok": False, "msg": f"解析失败: {e}"}
+        return {"ok": False, "msg": "服务启动后仍无法连接，请检查日志"}
+
+    # 远程模式：通过 SSH + socat
     remote_cmd = f'echo {repr(payload)} | socat - UNIX-CONNECT:{SOCK_PATH}'
     for attempt in (1, 2):
         try:
@@ -169,7 +238,6 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
         err = result.stderr.strip()
         no_service = "No such file" in err or "Connection refused" in err
         if cmd == "start" and attempt == 1 and no_service:
-            # 兜底：服务已停时，先拉起 systemd 服务再重试一次 socket
             print("机器人未运行，正在启动服务...")
             try:
                 subprocess.run(
@@ -178,13 +246,12 @@ def send_cmd(cmd: str, args: list[str] | None = None) -> dict:
                 )
             except subprocess.TimeoutExpired:
                 return {"ok": False, "msg": "启动服务超时，请检查 EC2 状态"}
-            time.sleep(3)  # 等待 bot 初始化完成、socket 就绪
+            time.sleep(3)
             continue
         if no_service:
             return {"ok": False, "msg": "机器人未运行或控制服务未启动"}
         return {"ok": False, "msg": f"SSH 错误: {err}"}
     else:
-        # 两次都失败
         return {"ok": False, "msg": "服务启动后仍无法连接，请检查 EC2 上的日志"}
 
     out = result.stdout.strip()
@@ -425,7 +492,8 @@ def _print_menu() -> None:
 
 def interactive() -> None:
     """交互式数字菜单。"""
-    print("套利机器人远程控制")
+    mode = "本地直连" if IS_LOCAL else f"SSH → {SSH_HOST}"
+    print(f"套利机器人控制台 ({mode})")
     _print_menu()
 
     while True:
@@ -658,11 +726,8 @@ def interactive() -> None:
         if choice == 11:
             # 读取当前 symbol
             try:
-                result = subprocess.run(
-                    ["ssh", SSH_HOST, "grep 'symbol_spot' /home/ubuntu/arbitrage-bot/config.yaml"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                current = result.stdout.strip().split(":")[-1].strip() if result.returncode == 0 else "未知"
+                ok, out = _run_cmd(f"grep 'symbol_spot' {_get_config_path()}")
+                current = out.split(":")[-1].strip() if ok and out else "未知"
             except Exception:
                 current = "未知"
             print(f"  当前代币: {current}")
@@ -686,37 +751,23 @@ def interactive() -> None:
                 continue
 
             print(f"正在修改配置为 {new_symbol}...")
-            remote_cmd = (
-                f"cd /home/ubuntu/arbitrage-bot && "
-                f"sed -i 's/symbol_spot: .*/symbol_spot: {new_symbol}/' config.yaml && "
-                f"sed -i 's/symbol_fut: .*/symbol_fut: {new_symbol}/' config.yaml && "
+            config_path = _get_config_path()
+            cmd = (
+                f"sed -i 's/symbol_spot: .*/symbol_spot: {new_symbol}/' {config_path} && "
+                f"sed -i 's/symbol_fut: .*/symbol_fut: {new_symbol}/' {config_path} && "
                 f"echo OK"
             )
-            try:
-                result = subprocess.run(
-                    ["ssh", SSH_HOST, remote_cmd],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if "OK" in result.stdout:
-                    print(f"✅ 配置已切换到 {new_symbol}")
-                    # 自动重启服务使新代币生效
-                    print("正在重启机器人服务...")
-                    try:
-                        subprocess.run(
-                            ["ssh", SSH_HOST, "sudo systemctl restart arb-bot"],
-                            capture_output=True, text=True, timeout=15,
-                        )
-                        time.sleep(3)
-                        print("✅ 机器人已重启，新代币已生效")
-                    except subprocess.TimeoutExpired:
-                        print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
+            ok, out = _run_cmd(cmd)
+            if "OK" in out:
+                print(f"✅ 配置已切换到 {new_symbol}")
+                print("正在重启机器人服务...")
+                if _restart_service():
+                    time.sleep(3)
+                    print("✅ 机器人已重启，新代币已生效")
                 else:
-                    print(f"⚠ 修改失败")
-                    print(result.stderr)
-            except subprocess.TimeoutExpired:
-                print("⚠ 操作超时，请手动检查 EC2 状态")
-            except Exception as e:
-                print(f"⚠ 操作失败: {e}")
+                    print("⚠ 重启失败，请手动执行: sudo systemctl restart arb-bot")
+            else:
+                print("⚠ 修改失败")
 
             _print_menu()
             continue
@@ -736,15 +787,11 @@ def interactive() -> None:
                 _print_menu()
                 continue
             print(f"已切换到账户: {acct_name}，正在重启机器人服务...")
-            try:
-                subprocess.run(
-                    ["ssh", SSH_HOST, "sudo systemctl restart arb-bot"],
-                    capture_output=True, text=True, timeout=15,
-                )
+            if _restart_service():
                 time.sleep(3)
                 print("✅ 机器人已重启，账户切换生效")
-            except subprocess.TimeoutExpired:
-                print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
+            else:
+                print("⚠ 重启失败，请手动执行: sudo systemctl restart arb-bot")
             _print_menu()
             continue
 
@@ -782,15 +829,11 @@ def interactive() -> None:
                 _print_menu()
                 continue
             print(f"已切换到交易所: {new_exchange}，正在重启机器人服务...")
-            try:
-                subprocess.run(
-                    ["ssh", SSH_HOST, "sudo systemctl restart arb-bot"],
-                    capture_output=True, text=True, timeout=15,
-                )
+            if _restart_service():
                 time.sleep(3)
                 print(f"✅ 机器人已重启，交易所切换到 {new_exchange}")
-            except subprocess.TimeoutExpired:
-                print("⚠ 重启超时，请手动执行: sudo systemctl restart arb-bot")
+            else:
+                print("⚠ 重启失败，请手动执行: sudo systemctl restart arb-bot")
             _print_menu()
             continue
 
